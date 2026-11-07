@@ -1,10 +1,10 @@
 {
   "file": "tayron lite 2 corrected.stl",
-  "sha256": "219452168dc629815e05a3579a75eeadc290fd05274014f94213f1a1ce9e125e",
+  "sha256": "84d0959eeda104d36235e90a755c5b97f0e11379807d26606f15b936bf0f012b",
   "units": "unspecified in STL; no automatic millimetre conversion",
-  "raw_vertices": 880170,
-  "vertices_after_index_welding": 146507,
-  "faces": 293390,
+  "raw_vertices": 913470,
+  "vertices_after_index_welding": 152059,
+  "faces": 304490,
   "bounds": [
     [
       -449.94189453125,
@@ -14,16 +14,16 @@
     [
       449.9592590332031,
       213.490478515625,
-      173.56065368652344
+      172.41519165039062
     ]
   ],
   "extents": [
     899.9011535644531,
     426.95677185058594,
-    345.9577331542969
+    344.81227111816406
   ],
-  "surface_area": 1489237.74864528,
-  "signed_volume": 65415103.886490755,
+  "surface_area": 1486402.012916096,
+  "signed_volume": 65412629.482570656,
   "watertight": true,
   "winding_consistent": true,
   "positive_component_volumes": true,
@@ -33,8 +33,8 @@
   "duplicate_faces_after_welding": 0,
   "components": [
     {
-      "faces": 273422,
-      "vertices": 136587,
+      "faces": 284522,
+      "vertices": 142139,
       "bounds": [
         [
           -449.94189453125,
@@ -44,13 +44,13 @@
         [
           449.9592590332031,
           213.490478515625,
-          173.56065368652344
+          172.41519165039062
         ]
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 63519269.897374064,
-      "euler_number": -124
+      "signed_volume": 63516795.49345396,
+      "euler_number": -122
     },
     {
       "faces": 4992,
@@ -134,9 +134,9 @@
     }
   ],
   "edge_length_quantiles_0_50_99_100": [
-    0.0021578781824038752,
-    3.283223135363699,
-    14.2136340686064,
+    9.28155903670993e-05,
+    3.263329667988511,
+    14.213628707119586,
     47.00002194326812
   ],
   "notes": [
