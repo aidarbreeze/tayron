@@ -60,6 +60,8 @@ def boolean(kind, meshes):
     meshes = [m for m in meshes if m is not None and len(m.faces)]
     if kind == 'union':
         return trimesh.boolean.union(meshes, engine=ENGINE)
+    if kind == 'inter':
+        return trimesh.boolean.intersection(meshes, engine=ENGINE)
     return trimesh.boolean.difference([meshes[0]] + meshes[1:], engine=ENGINE)
 
 
@@ -167,6 +169,7 @@ def sweep(path, section, up=(0, 0, 1)):
     """Sweep a closed 2-D section along a 3-D path (parallel transport frame)."""
     path = np.asarray(path, dtype=float)
     sec = np.asarray(section, dtype=float)
+    per_station = sec.ndim == 3
     tangents = np.gradient(path, axis=0)
     tangents /= np.linalg.norm(tangents, axis=1)[:, None]
     up = np.asarray(up, dtype=float)
@@ -177,7 +180,8 @@ def sweep(path, section, up=(0, 0, 1)):
             a = np.cross(t, [1.0, 0, 0])
         a /= np.linalg.norm(a)
         b = np.cross(t, a)
-        rings.append(path[i] + sec[:, 0][:, None] * a + sec[:, 1][:, None] * b)
+        s_i = sec[i] if per_station else sec
+        rings.append(path[i] + s_i[:, 0][:, None] * a + s_i[:, 1][:, None] * b)
     return loft(rings)
 
 
@@ -503,6 +507,249 @@ def build_wheels():
 
 
 # --------------------------------------------------------------------------
+# Surface queries used to sit details on the skin
+# --------------------------------------------------------------------------
+def side_y(params, x, z, n_half=96):
+    sec = body_section(params, x, n_half=n_half)[:n_half]
+    f, zmin, zmax = _mono_y_of_z(sec)
+    return float(f(np.clip(z, zmin + 0.2, zmax - 0.2)))
+
+
+def roof_z(params, x, y, n_half=96):
+    sec = body_section(params, x, n_half=n_half)[:n_half]
+    z0, w_sill, w_max, z_hip, w_belt, z_belt, w_roof, z_roof = [float(f(x)) for f in params]
+    gh = max(z_roof, z_belt + 1.2) - z_belt
+    f, ymin, ymax = _mono_z_of_y(sec[sec[:, 2] >= z_belt + 0.5 * gh])
+    return float(f(np.clip(abs(y), ymin, ymax - 0.2)))
+
+
+def groove_along_side(params, xa, xb, z_of_x, depth=1.8, width=3.0, nx=60):
+    """Shallow channel following the flank (character line / shut lines)."""
+    out = []
+    xs = np.linspace(xa, xb, nx)
+    for side in (-1, 1):
+        path = np.array([[x, side * (side_y(params, x, z_of_x(x)) + depth * 0.55), z_of_x(x)]
+                         for x in xs])
+        out.append(sweep(path, rounded_section(depth * 3.0, width, r=width * 0.35, n=4)))
+    return out
+
+
+def groove_vertical(params, x_of_z, za, zb, depth=1.6, width=2.6, nz=30):
+    out = []
+    zs = np.linspace(za, zb, nz)
+    for side in (-1, 1):
+        path = np.array([[x_of_z(z), side * (side_y(params, x_of_z(z), z) + depth * 0.55), z]
+                         for z in zs])
+        out.append(sweep(path, rounded_section(depth * 3.0, width, r=width * 0.35, n=4),
+                         up=(1, 0, 0)))
+    return out
+
+
+def lattice_bars(outline_yz, spacing, thickness, x_center, depth, span=260.0):
+    """Diamond mesh trimmed in 2-D, then extruded along X.
+
+    Trimming with shapely instead of a 3-D clip avoids the coplanar slivers a
+    boolean clip leaves where many bars end on the same plane.
+    """
+    from shapely.geometry import LineString
+    poly = Polygon(outline_yz)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    ylo, zlo, yhi, zhi = poly.bounds
+    bars = []
+    n = int((yhi - ylo + 2 * (zhi - zlo)) / spacing) + 2
+    for fam, sign in ((0, 1.0), (1, -1.0)):
+        xc = x_center + fam * 0.45
+        for k in range(-n, n + 1):
+            c = (ylo + yhi) / 2.0 + k * spacing
+            line = LineString([(c - span, zlo - span * sign), (c + span, zhi + (zhi - zlo) + span * sign)])
+            piece = line.buffer(thickness / 2.0, cap_style=2).intersection(poly)
+            if piece.is_empty:
+                continue
+            geoms = getattr(piece, 'geoms', [piece])
+            for g in geoms:
+                if g.area < 0.4:
+                    continue
+                pts = np.asarray(g.exterior.coords)[:-1]
+                bars.append(x_cut(pts, xc - depth / 2.0, xc + depth / 2.0))
+    return bars
+
+
+def x_cut(points_yz, x_floor, x_out=520.0):
+    """Prism along X from a YZ outline (used on the flat nose / tailgate)."""
+    poly = Polygon(points_yz)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    m = trimesh.creation.extrude_polygon(poly, abs(x_out - x_floor), engine=ENGINE)
+    v = m.vertices.copy()
+    m.vertices = np.column_stack([v[:, 2] + min(x_floor, x_out), v[:, 0], v[:, 1]])
+    m.fix_normals()
+    if m.volume < 0:
+        m.invert()
+    return m
+
+
+# --------------------------------------------------------------------------
+# Front fascia
+# --------------------------------------------------------------------------
+def front_fasia_cutters():
+    cuts = [
+        x_cut([(-166, 152), (166, 152), (168, 191), (-168, 191)], 444.5),
+        x_cut([(-104, 70), (104, 70), (120, 126), (-120, 126)], 444.0),
+        x_cut([(-52, 96), (52, 96), (52, 130), (-52, 130)], 447.0),
+    ]
+    for s in (-1, 1):
+        cuts.append(x_cut([(s * 126, 72), (s * 160, 78), (s * 158, 112), (s * 128, 116)], 444.0))
+    return cuts
+
+
+def front_fasia_addons():
+    adds = []
+    adds += lattice_bars([(-111, 154.5), (111, 154.5), (115, 188.5), (-115, 188.5)],
+                         spacing=13.0, thickness=2.6, x_center=446.2, depth=6.0, span=60.0)
+    adds.append(place(rounded_box([4.0, 300.0, 4.0], 1.4), [449.0, 0, 190.0]))
+    for s in (-1, 1):
+        for k in range(2):
+            lens = trimesh.creation.cylinder(radius=7.5, height=9.0, sections=28)
+            lens.apply_transform(rot_y(90))
+            adds.append(place(lens, [444.5, s * (124.0 + k * 20.0), 170.0]))
+        adds.append(place(rounded_box([8.0, 54.0, 4.0], 1.4), [445.0, s * 136.0, 184.0]))
+        adds.append(place(rounded_box([8.0, 46.0, 3.0], 1.2), [445.0, s * 134.0, 158.0]))
+    badge = trimesh.creation.cylinder(radius=15.0, height=8.0, sections=48)
+    badge.apply_transform(rot_y(90))
+    adds.append(place(badge, [448.0, 0, 168.0]))
+    ring = boolean('diff', [trimesh.creation.cylinder(radius=15.5, height=3.0, sections=48),
+                            trimesh.creation.cylinder(radius=12.5, height=6.0, sections=48)])
+    ring.apply_transform(rot_y(90))
+    adds.append(place(ring, [450.0, 0, 168.0]))
+    adds.append(place(rounded_box([6.0, 210.0, 16.0], 4.0), [448.0, 0, 56.0]))
+    adds.append(place(rounded_box([12.0, 286.0, 14.0], 4.0), [444.0, 0, 46.0]))
+    adds += lattice_bars([(-101, 72.5), (101, 72.5), (116, 123.5), (-116, 123.5)],
+                         spacing=15.0, thickness=2.4, x_center=445.8, depth=6.0, span=70.0)
+    return adds
+
+
+# --------------------------------------------------------------------------
+# Rear fascia
+# --------------------------------------------------------------------------
+def rear_cutters():
+    cuts = [
+        x_cut([(-58, 108), (58, 108), (58, 148), (-58, 148)], -452.0, -445.0),
+        x_cut([(-108, 46), (108, 46), (98, 74), (-98, 74)], -452.0, -443.0),
+    ]
+    for s in (-1, 1):
+        cuts.append(x_cut([(s * 17.0, 202), (s * 162.0, 199), (s * 162.0, 219), (s * 17.0, 216)],
+                          -452.0, -444.0))
+        cuts.append(x_cut([(s * 104.0, 186), (s * 164.0, 184), (s * 164.0, 222), (s * 104.0, 224)],
+                          -452.0, -443.0))
+        cuts.append(x_cut([(s * 112, 50), (s * 150, 54), (s * 148, 72), (s * 112, 70)],
+                          -452.0, -442.0))
+    return cuts
+
+
+def rear_addons():
+    adds = []
+    for s in (-1, 1):
+        adds.append(place(rounded_box([8.0, 143.0, 6.0], 2.0), [-447.0, s * 89.0, 209.0]))
+        for k in range(3):
+            adds.append(place(rounded_box([8.0, 14.0, 22.0], 3.0),
+                              [-446.0, s * (116.0 + k * 17.0), 203.0]))
+        adds.append(place(rounded_box([10.0, 34.0, 14.0], 4.0), [-445.0, s * 130.0, 61.0]))
+    badge = trimesh.creation.cylinder(radius=14.0, height=5.0, sections=48)
+    badge.apply_transform(rot_y(90))
+    adds.append(place(badge, [-449.0, 0, 208.0]))
+    for k in range(-3, 4):
+        adds.append(place(rounded_box([9.0, 5.0, 22.0], 1.5), [-445.0, k * 26.0, 60.0]))
+    adds.append(place(rounded_box([7.0, 250.0, 10.0], 3.0), [-447.0, 0, 92.0]))
+    params = _interp_stations()
+    path = np.array([[-348.0 - 0.05 * abs(y), y, roof_z(params, -348.0, y) + 2.0]
+                     for y in np.linspace(-132, 132, 29)])
+    adds.append(sweep(path, rounded_section(26.0, 7.0, r=2.5, n=5)))
+    adds.append(place(rounded_box([3.0, 96.0, 4.0], 1.5), [-424.0, -18.0, 246.0], rot_y(-38)))
+    adds.append(trimesh.convex.convex_hull(np.array([
+        [-268, -7, 312], [-236, -7, 312], [-262, -7, 334],
+        [-268, 7, 312], [-236, 7, 312], [-262, 7, 334],
+    ], dtype=float)))
+    return adds
+
+
+# --------------------------------------------------------------------------
+# Flanks and roof rails
+# --------------------------------------------------------------------------
+def flank_cutters():
+    params = _interp_stations()
+    cuts = []
+    cuts += groove_along_side(params, -412.0, 414.0, lambda x: 152.0 + 0.008 * x,
+                              depth=2.0, width=3.2, nx=70)
+    cuts += groove_along_side(params, -300.0, 300.0, lambda x: 74.0,
+                              depth=1.6, width=2.6, nx=50)
+    for xz in (lambda z: 178.0 - (z - 60.0) * 0.06,
+               lambda z: 2.0,
+               lambda z: -178.0 + (z - 60.0) * 0.03):
+        cuts += groove_vertical(params, xz, 48.0, 214.0)
+    flap = rounded_box([30.0, 8.0, 26.0], 6.0)
+    flap.apply_translation([-320.0, -(side_y(params, -320.0, 172.0) + 2.4), 172.0])
+    cuts.append(flap)
+    for s in (-1, 1):
+        xs = np.linspace(258.0, 432.0, 30)
+        path = np.array([[x, s * 58.0, roof_z(params, x, 58.0) + 1.0] for x in xs])
+        cuts.append(sweep(path, rounded_section(4.0, 2.6, r=0.9, n=4)))
+        xs = np.linspace(252.0, 436.0, 30)
+        path = np.array([[x, s * (float(params[6](x)) - 6.0),
+                          roof_z(params, x, float(params[6](x)) - 6.0) + 1.0] for x in xs])
+        cuts.append(sweep(path, rounded_section(3.4, 2.4, r=0.8, n=4)))
+    return cuts
+
+
+def flank_addons():
+    params = _interp_stations()
+    adds = []
+    for s in (-1, 1):
+        for hx in (96.0, -86.0):
+            y = side_y(params, hx, 190.0)
+            adds.append(place(rounded_box([34.0, 7.0, 9.0], 3.0), [hx, s * (y + 1.5), 190.0]))
+        base_y = side_y(params, 176.0, 222.0)
+        adds.append(place(rounded_box([16.0, 20.0, 9.0], 3.0),
+                          [176.0, s * (base_y + 7.0), 226.0], rot_z(s * 12)))
+        adds.append(trimesh.convex.convex_hull(np.array([
+            [164, s * (base_y + 8), 224], [198, s * (base_y + 8), 225],
+            [164, s * (base_y + 8), 240], [198, s * (base_y + 8), 241],
+            [158, s * (base_y + 28), 226], [192, s * (base_y + 30), 228],
+            [160, s * (base_y + 28), 245], [190, s * (base_y + 30), 246],
+            [166, s * (base_y + 32), 230], [188, s * (base_y + 33), 232],
+            [167, s * (base_y + 32), 242], [187, s * (base_y + 33), 243],
+        ], dtype=float)))
+        adds.append(place(rounded_box([26.0, 4.0, 13.0], 2.0),
+                          [176.0, s * (base_y + 30.0), 236.0]))
+        # straight sill strip between the arches; a prism crosses the flank
+        # transversally, where a surface-hugging sweep would graze it and
+        # leave sliver triangles in the union
+        adds.append(place(rounded_box([392.0, 16.0, 26.0], 4.0), [0.0, s * 168.0, 56.0]))
+    return adds
+
+
+def roof_rails():
+    params = _interp_stations()
+    adds = []
+    xs = np.linspace(-282.0, 36.0, 55)
+    t = (xs + 282.0) / 318.0
+    end = np.clip(np.minimum(t, 1 - t) / 0.10, 0, 1)
+    end = end * end * (3 - 2 * end)
+    for s in (-1, 1):
+        y = s * 112.0
+        base = np.array([roof_z(params, x, y) for x in xs])
+        ped_h = 2.2 + 6.0 * end
+        ped = np.column_stack([xs, np.full_like(xs, y), base + ped_h / 2.0 - 0.8])
+        ped_secs = np.array([rounded_section(7.0, h + 1.6, r=min(1.6, h * 0.4), n=5)
+                             for h in ped_h])
+        adds.append(sweep(ped, ped_secs))
+        cap = np.column_stack([xs, np.full_like(xs, y), base + ped_h + 1.4])
+        cap_secs = np.array([rounded_section(6.0 + 3.0 * e, 4.6, r=2.0, n=6) for e in end])
+        adds.append(sweep(cap, cap_secs))
+    return adds
+
+
+# --------------------------------------------------------------------------
 # Assembly
 # --------------------------------------------------------------------------
 def build(parts='body'):
@@ -510,6 +757,9 @@ def build(parts='body'):
     body = boolean('diff', [body] + wheel_arch_cutters())
     body = boolean('union', [body] + arch_cladding())
     body = boolean('diff', [body] + glazing_cutters())
+    body = boolean('diff', [body] + front_fasia_cutters() + rear_cutters() + flank_cutters())
+    body = boolean('union', [body] + front_fasia_addons() + rear_addons()
+                   + flank_addons() + roof_rails())
     wheels = build_wheels()
     return body, wheels
 
@@ -520,11 +770,24 @@ def finalize(mesh):
     Booleans leave slivers whose vertices collapse when written as float32;
     weld at 1e-4, drop the collapsed triangles and close the pinholes.
     """
-    m = mesh.copy()
+    # Round-trip through binary STL first: float32 storage is what the user
+    # loads, so cleanup must happen on exactly those coordinates.
+    m = trimesh.load(trimesh.util.wrap_as_stream(mesh.export(file_type='stl')),
+                     file_type='stl', process=True)
+    # Weld and drop any remaining slivers.
+    m.vertices = np.asarray(m.vertices, dtype=np.float32).astype(np.float64)
     m.merge_vertices(digits_vertex=4)
     m.update_faces(m.nondegenerate_faces(height=1e-4))
     m.update_faces(m.unique_faces())
+    m.remove_unreferenced_vertices()
     trimesh.repair.fill_holes(m)
+    groups = trimesh.graph.connected_components(
+        m.face_adjacency, min_len=12, nodes=np.arange(len(m.faces)))
+    keep = np.zeros(len(m.faces), dtype=bool)
+    for g in groups:
+        keep[g] = True
+    m.update_faces(keep)
+    m.remove_unreferenced_vertices()
     m.fix_normals()
     return m
 

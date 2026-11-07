@@ -1,29 +1,29 @@
 {
   "file": "tayron from scratch.stl",
-  "sha256": "2536fa25d183138646d7bd1e7f91693696bcd692ff0dc7c5d9b5610c392e48cc",
+  "sha256": "5e810270bc0044e31b8a82cc01f102da849ca63519058e08afababfa7d32ca4b",
   "units": "unspecified in STL; no automatic millimetre conversion",
-  "raw_vertices": 227874,
-  "vertices_after_index_welding": 37909,
-  "faces": 75958,
+  "raw_vertices": 336210,
+  "vertices_after_index_welding": 55921,
+  "faces": 112070,
   "bounds": [
     [
-      -450.0,
-      -185.0,
+      -451.5,
+      -204.67051696777344,
       -1.5258789289873675e-06
     ],
     [
-      450.0,
-      185.0,
-      323.265869140625
+      452.0,
+      204.67051696777344,
+      334.0
     ]
   ],
   "extents": [
-    900.0,
-    370.0,
-    323.26587066650393
+    903.5,
+    409.3410339355469,
+    334.00000152587893
   ],
-  "surface_area": 1528133.5109354306,
-  "signed_volume": 69218327.7445066,
+  "surface_area": 1647325.775985125,
+  "signed_volume": 69265022.12536737,
   "watertight": true,
   "winding_consistent": true,
   "positive_component_volumes": true,
@@ -33,24 +33,24 @@
   "duplicate_faces_after_welding": 0,
   "components": [
     {
-      "faces": 44014,
-      "vertices": 22009,
+      "faces": 80126,
+      "vertices": 40021,
       "bounds": [
         [
-          -450.0,
-          -185.0,
+          -451.5,
+          -204.67051696777344,
           37.0
         ],
         [
-          450.0,
-          185.0,
-          323.265869140625
+          452.0,
+          204.67051696777344,
+          334.0
         ]
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 67366736.78819306,
-      "euler_number": 2
+      "signed_volume": 67413431.16905384,
+      "euler_number": -42
     },
     {
       "faces": 7986,
@@ -69,7 +69,7 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.73788135144,
+      "signed_volume": 462897.7378813511,
       "euler_number": -18
     },
     {
@@ -89,7 +89,7 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.73760407086,
+      "signed_volume": 462897.73760407115,
       "euler_number": -18
     },
     {
@@ -129,15 +129,15 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.74027541623,
+      "signed_volume": 462897.74027541635,
       "euler_number": -18
     }
   ],
   "edge_length_quantiles_0_50_99_100": [
-    5.501634636633284e-05,
-    5.575996203294254,
-    63.007686310464464,
-    185.04024030543874
+    1.52587890625e-05,
+    5.178652591765994,
+    63.299692687830124,
+    386.4721374511719
   ],
   "notes": [
     "Index welding is an audit operation; STL itself stores separate triangle vertices.",
