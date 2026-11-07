@@ -1,0 +1,7 @@
+numpy
+scipy
+trimesh>=4.0
+numba
+Pillow
+shapely
+manifold3d
