@@ -1,0 +1,39 @@
+{
+  "source": "procedural, no source STL read",
+  "proportions": {
+    "length": 900.0,
+    "wheelbase": 566.8,
+    "axle_front_x": 283.4,
+    "axle_rear_x": -283.4,
+    "tyre_radius": 71.4,
+    "tyre_width": 45.0,
+    "track_half": 152.0,
+    "rim_radius": 48.0,
+    "body_half_width": 184.0,
+    "mirror_half_span": 199.0,
+    "roof_height": 322.0,
+    "rail_height": 332.4,
+    "beltline_height": 218.0,
+    "glass_top_height": 315.4,
+    "hood_cowl_height": 216.0,
+    "hood_front_height": 198.0,
+    "sill_height": 40.0,
+    "arch_radius": 84.0,
+    "rear_light_bar_height": 211.0,
+    "roof_half_width": 120.0,
+    "side_glass_rear_x": -303.0,
+    "side_glass_front_x": 171.0,
+    "cowl_x": 245.0,
+    "a_pillar_top_x": 58.0,
+    "roof_rear_x": -330.0,
+    "rear_glass_base_x": -437.0
+  },
+  "faces": 75958,
+  "watertight": true,
+  "components": 5,
+  "extents": [
+    900.0,
+    370.0,
+    323.26587066650393
+  ]
+}

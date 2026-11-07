@@ -1,0 +1,41 @@
+{
+  "purpose": "Proportions measured from the reference photographs and used by tools/build_from_photos.py. No vertex data is taken from any existing STL.",
+  "method": {
+    "side_photo": "1793820501.png",
+    "side_car_bbox_px": [105, 2274, 569, 1380],
+    "side_scale": "900 nominal units / 2169 px = 0.41494 units per px",
+    "side_origin": "x_mid = 1189.5 px, ground y = 1370 px",
+    "wheel_centres_px": {"rear": [507, 1194], "front": [1873, 1187]},
+    "wheel_detection": "connected components of dark pixels below y=950; rim circles 230x228 px and 232x232 px",
+    "front_photo": "1793820865.png",
+    "rear_photo": "1793820606.png",
+    "rear_light_bar": "red-pixel bbox x 644..1678, y 978..1057; centre at 0.635 of vehicle height, span 0.884 of vehicle width"
+  },
+  "derived": {
+    "overall_length": 900.0,
+    "overall_height_to_rail": 332.4,
+    "roof_panel_height": 322.0,
+    "height_over_length": 0.374,
+    "wheelbase": 566.8,
+    "front_overhang": 166.6,
+    "rear_overhang": 166.6,
+    "tyre_diameter": 142.8,
+    "tyre_diameter_over_length": 0.1586,
+    "beltline_height": 218.3,
+    "side_glass_top_height": 315.4,
+    "side_glass_x_range": [-302.7, 171.2],
+    "hood_at_cowl_height": 215.8,
+    "hood_front_height": 201.2,
+    "cowl_x": 245.0,
+    "a_pillar_top_x": 58.0,
+    "roof_rear_x": -330.0,
+    "rear_glass_base_x": -437.0,
+    "roof_width_over_body_width": 0.65,
+    "rear_light_bar_height": 211.0
+  },
+  "notes": [
+    "Front and rear photographs are perspective images, so widths taken from them are used only as ratios (roof/body, bar/body), never as absolute lengths.",
+    "Overall length is normalised to 900 nominal units so the from-scratch model frames identically to the earlier corrected model.",
+    "Values are rounded; the generator keeps them in one PROPORTIONS table."
+  ]
+}
