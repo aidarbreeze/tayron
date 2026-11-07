@@ -1,10 +1,10 @@
 {
   "file": "tayron from scratch.stl",
-  "sha256": "5e810270bc0044e31b8a82cc01f102da849ca63519058e08afababfa7d32ca4b",
+  "sha256": "9f82c0884d3341addbf3f2f0d885c5096d27d3260b72976133ad67e15eb9733e",
   "units": "unspecified in STL; no automatic millimetre conversion",
-  "raw_vertices": 336210,
-  "vertices_after_index_welding": 55921,
-  "faces": 112070,
+  "raw_vertices": 336540,
+  "vertices_after_index_welding": 55974,
+  "faces": 112180,
   "bounds": [
     [
       -451.5,
@@ -22,8 +22,8 @@
     409.3410339355469,
     334.00000152587893
   ],
-  "surface_area": 1647325.775985125,
-  "signed_volume": 69265022.12536737,
+  "surface_area": 1646082.8567688777,
+  "signed_volume": 68952430.39827795,
   "watertight": true,
   "winding_consistent": true,
   "positive_component_volumes": true,
@@ -33,8 +33,8 @@
   "duplicate_faces_after_welding": 0,
   "components": [
     {
-      "faces": 80126,
-      "vertices": 40021,
+      "faces": 80236,
+      "vertices": 40074,
       "bounds": [
         [
           -451.5,
@@ -49,8 +49,8 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 67413431.16905384,
-      "euler_number": -42
+      "signed_volume": 67100839.44196441,
+      "euler_number": -44
     },
     {
       "faces": 7986,
@@ -69,7 +69,7 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.7378813511,
+      "signed_volume": 462897.737881351,
       "euler_number": -18
     },
     {
@@ -89,7 +89,7 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.73760407115,
+      "signed_volume": 462897.7376040709,
       "euler_number": -18
     },
     {
@@ -109,7 +109,7 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.7405527015,
+      "signed_volume": 462897.7405527017,
       "euler_number": -18
     },
     {
@@ -134,9 +134,9 @@
     }
   ],
   "edge_length_quantiles_0_50_99_100": [
-    1.52587890625e-05,
-    5.178652591765994,
-    63.299692687830124,
+    1.7059844799040144e-05,
+    5.188235670524861,
+    63.2862163132517,
     386.4721374511719
   ],
   "notes": [
