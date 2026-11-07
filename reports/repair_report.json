@@ -1,0 +1,33 @@
+{
+  "source": "tayron lite 2.stl",
+  "output": "tayron lite 2 corrected.stl",
+  "vertices": 180269,
+  "faces": 360842,
+  "watertight": true,
+  "winding_consistent": true,
+  "moved_vertices": 56233,
+  "max_displacement": 2.2697932447924773,
+  "mean_displacement_moved": 0.4790588175223359,
+  "panel_interior_vertices": 52806,
+  "rail_vertices": 2750,
+  "intake_interior_vertices": 320,
+  "rear_bar_interior_vertices": 364,
+  "bounds_before": [
+    [
+      -449.94189453125,
+      -213.46629333496094,
+      -172.39707946777344
+    ],
+    [
+      449.9592590332031,
+      213.490478515625,
+      172.41519165039062
+    ]
+  ],
+  "notes": [
+    "Topology unchanged; only vertex positions were adjusted.",
+    "Sharp creases and small details were protected by masks.",
+    "Displacements were capped per region to avoid silhouette drift.",
+    "This is a visual cleanup, not a certified manufacturing repair."
+  ]
+}

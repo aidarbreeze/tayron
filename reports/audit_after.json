@@ -1,0 +1,148 @@
+{
+  "file": "tayron lite 2 corrected.stl",
+  "sha256": "a685d6c3f570713b3233b5d9dfb1621bc273825504b6339382d667c691729cab",
+  "units": "unspecified in STL; no automatic millimetre conversion",
+  "raw_vertices": 1082526,
+  "vertices_after_index_welding": 180269,
+  "faces": 360842,
+  "bounds": [
+    [
+      -449.94189453125,
+      -213.46629333496094,
+      -172.39707946777344
+    ],
+    [
+      449.9592590332031,
+      213.490478515625,
+      172.41519165039062
+    ]
+  ],
+  "extents": [
+    899.9011535644531,
+    426.95677185058594,
+    344.81227111816406
+  ],
+  "surface_area": 1434880.3449486555,
+  "signed_volume": 65933535.99512903,
+  "watertight": true,
+  "winding_consistent": true,
+  "positive_component_volumes": true,
+  "boundary_edges": 0,
+  "nonmanifold_edges": 0,
+  "degenerate_faces_after_welding": 0,
+  "duplicate_faces_after_welding": 0,
+  "components": [
+    {
+      "faces": 272218,
+      "vertices": 135989,
+      "bounds": [
+        [
+          -449.94189453125,
+          -213.46629333496094,
+          -134.05203247070312
+        ],
+        [
+          449.9592590332031,
+          213.490478515625,
+          172.41519165039062
+        ]
+      ],
+      "watertight": true,
+      "winding_consistent": true,
+      "signed_volume": 63519608.96050745,
+      "euler_number": -120
+    },
+    {
+      "faces": 22196,
+      "vertices": 11090,
+      "bounds": [
+        [
+          -341.8475646972656,
+          -181.70361328125,
+          -172.3670654296875
+        ],
+        [
+          -196.7947235107422,
+          -131.18572998046875,
+          -26.418519973754883
+        ]
+      ],
+      "watertight": true,
+      "winding_consistent": true,
+      "signed_volume": 603838.692607667,
+      "euler_number": -8
+    },
+    {
+      "faces": 22196,
+      "vertices": 11090,
+      "bounds": [
+        [
+          -341.8475646972656,
+          131.18576049804688,
+          -172.3670654296875
+        ],
+        [
+          -196.79470825195312,
+          181.7036590576172,
+          -26.418519973754883
+        ]
+      ],
+      "watertight": true,
+      "winding_consistent": true,
+      "signed_volume": 603812.2381034686,
+      "euler_number": -8
+    },
+    {
+      "faces": 22116,
+      "vertices": 11050,
+      "bounds": [
+        [
+          192.8170166015625,
+          -181.72169494628906,
+          -172.39707946777344
+        ],
+        [
+          337.1951599121094,
+          -131.2501220703125,
+          -26.418197631835938
+        ]
+      ],
+      "watertight": true,
+      "winding_consistent": true,
+      "signed_volume": 603142.3637584813,
+      "euler_number": -8
+    },
+    {
+      "faces": 22116,
+      "vertices": 11050,
+      "bounds": [
+        [
+          192.81703186035156,
+          131.2500762939453,
+          -172.39707946777344
+        ],
+        [
+          337.20025634765625,
+          181.72164916992188,
+          -26.418197631835938
+        ]
+      ],
+      "watertight": true,
+      "winding_consistent": true,
+      "signed_volume": 603133.7401519626,
+      "euler_number": -8
+    }
+  ],
+  "edge_length_quantiles_0_50_99_100": [
+    0.2733879530416664,
+    3.106903797429737,
+    5.42284870592824,
+    8.55113149052347
+  ],
+  "notes": [
+    "Index welding is an audit operation; STL itself stores separate triangle vertices.",
+    "Separate closed wheel shells are not automatically treated as stray objects.",
+    "Closed edges and consistent winding do not establish absence of inter-shell intersections.",
+    "Visual fidelity and fitness for a particular manufacturing process require separate checks."
+  ]
+}
