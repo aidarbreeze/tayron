@@ -317,30 +317,83 @@ def rounded_section(w, h, r=1.0, n=6):
 # --------------------------------------------------------------------------
 # station:  x      z0    w_sill w_max z_hip w_belt z_belt w_roof z_roof
 STATIONS = np.array([
-    [-450.0,  96.0, 148.0, 170.0, 118.0, 166.0, 226.0, 150.0, 227.5],
-    [-444.0,  74.0, 160.0, 178.0, 120.0, 173.0, 227.0, 152.0, 231.0],
-    [-437.0,  66.0, 168.0, 182.0, 124.0, 177.0, 227.0, 152.0, 234.0],
-    [-420.0,  60.0, 171.0, 184.0, 128.0, 179.0, 226.0, 147.0, 248.0],
-    [-395.0,  54.0, 172.0, 184.0, 130.0, 179.0, 224.0, 138.0, 268.0],
-    [-365.0,  50.0, 170.0, 184.0, 130.0, 178.0, 222.0, 128.0, 290.0],
-    [-330.0,  50.0, 168.0, 184.0, 130.0, 177.0, 221.0, 117.0, 301.0],
-    [-280.0,  50.0, 166.0, 184.0, 130.0, 176.0, 220.0, 117.0, 310.0],
-    [-200.0,  50.0, 166.0, 184.0, 130.0, 175.0, 219.0, 118.5, 317.0],
-    [-100.0,  50.0, 166.0, 183.5, 130.0, 174.5, 218.5, 120.0, 322.5],
-    [0.0,     50.0, 166.0, 183.0, 130.0, 174.0, 218.0, 120.0, 320.0],
-    [58.0,    50.0, 166.0, 183.0, 130.0, 174.0, 218.0, 121.0, 314.0],
-    [110.0,   50.0, 166.0, 183.0, 130.0, 173.5, 217.5, 132.0, 293.0],
-    [160.0,   50.0, 166.0, 182.5, 130.0, 173.0, 217.0, 146.0, 264.0],
-    [205.0,   50.0, 165.0, 181.5, 129.0, 172.0, 216.5, 158.0, 234.0],
-    [245.0,   50.0, 164.0, 180.0, 128.0, 171.0, 210.0, 163.0, 215.0],
-    [300.0,   50.0, 163.0, 179.0, 126.0, 170.0, 205.0, 162.0, 211.5],
-    [335.0,   50.0, 162.0, 178.5, 125.0, 169.0, 202.0, 161.0, 218.0],
-    [360.0,   50.0, 161.0, 177.5, 123.0, 168.0, 200.0, 160.0, 214.5],
-    [410.0,   50.0, 159.0, 176.0, 120.0, 166.0, 195.0, 158.0, 200.0],
-    [437.0,   52.0, 155.0, 173.0, 118.0, 163.0, 191.0, 155.0, 197.0],
-    [446.0,   56.0, 148.0, 167.0, 118.0, 158.0, 189.0, 150.0, 195.0],
-    [450.0,   60.0, 138.0, 156.0, 118.0, 148.0, 187.0, 140.0, 193.0],
+    [-450.0,  96.0, 148.0, 171.0, 112.0, 166.0, 226.0, 150.0, 227.5],
+    [-444.0,  74.0, 160.0, 179.0, 113.0, 173.0, 227.0, 152.0, 231.0],
+    [-437.0,  66.0, 168.0, 184.0, 115.0, 177.0, 227.0, 152.0, 234.0],
+    [-420.0,  60.0, 171.0, 186.0, 110.0, 179.0, 226.0, 147.0, 248.0],
+    [-395.0,  54.0, 172.0, 186.0, 107.0, 179.0, 224.0, 138.0, 268.0],
+    [-365.0,  50.0, 170.0, 186.0, 105.0, 178.0, 222.0, 128.0, 290.0],
+    [-330.0,  50.0, 168.0, 186.0, 105.0, 177.0, 221.0, 117.0, 301.0],
+    [-280.0,  50.0, 166.0, 186.0, 105.0, 176.0, 220.0, 117.0, 310.0],
+    [-200.0,  50.0, 166.0, 186.0, 105.0, 175.0, 219.0, 118.5, 317.0],
+    [-100.0,  50.0, 166.0, 186.0, 105.0, 174.5, 218.5, 120.0, 322.5],
+    [0.0,     50.0, 166.0, 186.0, 105.0, 174.0, 218.0, 120.0, 320.0],
+    [58.0,    50.0, 166.0, 186.0, 105.0, 174.0, 218.0, 121.0, 314.0],
+    [110.0,   50.0, 166.0, 186.0, 105.0, 173.5, 217.5, 132.0, 293.0],
+    [160.0,   50.0, 166.0, 185.5, 105.0, 173.0, 217.0, 146.0, 264.0],
+    [205.0,   50.0, 165.0, 184.5, 105.0, 172.0, 216.5, 158.0, 234.0],
+    [245.0,   50.0, 164.0, 183.0, 106.0, 171.0, 210.0, 163.0, 215.0],
+    [300.0,   50.0, 163.0, 181.0, 106.0, 170.0, 205.0, 162.0, 211.5],
+    [335.0,   50.0, 162.0, 180.5, 107.0, 169.0, 202.0, 161.0, 218.0],
+    [360.0,   50.0, 161.0, 179.5, 108.0, 168.0, 200.0, 160.0, 214.5],
+    [410.0,   50.0, 159.0, 177.0, 110.0, 166.0, 195.0, 158.0, 200.0],
+    [437.0,   52.0, 155.0, 174.0, 112.0, 163.0, 191.0, 155.0, 197.0],
+    [446.0,   56.0, 148.0, 168.0, 114.0, 158.0, 189.0, 150.0, 195.0],
+    [450.0,   60.0, 138.0, 157.0, 115.0, 148.0, 187.0, 140.0, 193.0],
 ])
+
+
+
+def _smoothstep(a, b, t):
+    t = np.clip((np.asarray(t, dtype=float) - a) / (b - a), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def flank_relief(x, z, z0, z_belt):
+    """Half-width offset that gives the flank its sculpture.
+
+    A lofted section with a fixed table of widths produces flat slabs: the
+    reference car swells over each wheel, scoops in through the doors and
+    carries a shoulder ridge under the glass.  All three are added here as
+    smooth fields of (x, z), so every surface query (side_y, the glass
+    pockets, the handles) sees the same sculpted skin.
+    """
+    z = np.asarray(z, dtype=float)
+    t = (z - z0) / max(z_belt - z0, 1.0)
+    # fade in above the sill and out into the greenhouse, so the relief never
+    # puts a crease where the glass pocket has to follow the surface
+    win = _smoothstep(0.02, 0.20, t) * (1.0 - _smoothstep(0.86, 1.02, t))
+    swell = np.zeros_like(z)
+    for ax in (PROPORTIONS['axle_front_x'], PROPORTIONS['axle_rear_x']):
+        swell += 4.5 * np.exp(-((x - ax) / 100.0) ** 2) * np.exp(-((z - 150.0) / 60.0) ** 2)
+    shoulder = (1.6 * np.exp(-((z - 198.0) / 11.0) ** 2)
+                * _smoothstep(-430.0, -370.0, x) * (1.0 - _smoothstep(400.0, 440.0, x)))
+    return win * (swell + shoulder)
+
+
+# Plan-view corner rounds.  The loft narrows towards the ends on its own, but
+# it does it over the last few units, which reads as a sharp vertical corner.
+# These arcs are wider early and tighter late, so the front and rear corners
+# become proper cylindrical rounds instead of a crease.
+_PLAN_ARCS = ((415.0, 138.0, 37.0), (-418.0, 142.0, 34.0))
+
+
+def plan_half(x):
+    x = np.asarray(x, dtype=float)
+    y = np.full_like(x, 195.0)
+    for xc, yc, r in _PLAN_ARCS:
+        d = (x - xc) if xc > 0 else (xc - x)
+        arc = yc + np.sqrt(np.clip(r * r - np.clip(d, 0.0, r) ** 2, 0.0, None))
+        y = np.where(d > 0.0, np.minimum(y, arc), y)
+    return y
+
+
+def plan_envelope_prism(z_half=420.0, n=600):
+    xs = np.linspace(-455.0, 455.0, n)
+    ys = plan_half(xs)
+    outline = np.vstack([np.column_stack([xs, ys]),
+                         np.column_stack([xs[::-1], -ys[::-1]])])
+    return prism_xy(outline, -30.0, z_half)
 
 
 def _interp_stations():
@@ -348,7 +401,7 @@ def _interp_stations():
     return [PchipInterpolator(x, STATIONS[:, i]) for i in range(1, STATIONS.shape[1])]
 
 
-def body_section(params, x, n_half=64):
+def body_section(params, x, n_half=88):
     z0, w_sill, w_max, z_hip, w_belt, z_belt, w_roof, z_roof = [float(f(x)) for f in params]
     z_roof = max(z_roof, z_belt + 1.2)
     w_roof = min(w_roof, w_belt - 1.0)
@@ -359,14 +412,25 @@ def body_section(params, x, n_half=64):
         (w_sill, z0 + 7.0),
         (w_max * 0.985, z0 + (z_hip - z0) * 0.55),
         (w_max, z_hip),
+        # measured tuck above the low bulge, then the slight rise that carries
+        # into the shoulder - this is what the doors were missing
+        (w_max - 4.5, z_hip + (z_belt - z_hip) * 0.28),
+        (w_max - 3.5, z_hip + (z_belt - z_hip) * 0.58),
         (w_belt + (w_max - w_belt) * 0.35, z_belt - 26.0),
         (w_belt + 0.8, z_belt - 3.0),
-        (w_belt - 2.0, z_belt + gh * 0.22),
-        (w_belt - (w_belt - w_roof) * 0.42, z_belt + gh * 0.52),
-        (w_roof + 2.0, z_belt + gh * 0.86),
+        (w_belt - (w_belt - w_roof) * 0.22 - 1.0, z_belt + gh * 0.22),
+        (w_belt - (w_belt - w_roof) * 0.52 - 1.5, z_belt + gh * 0.52),
+        (w_belt - (w_belt - w_roof) * 0.86 - 1.0, z_belt + gh * 0.86),
         (w_roof - 4.0, z_belt + gh * 0.985),
-        (w_roof * 0.72, z_roof + 1.2),
-        (0.0, z_roof + 2.0),
+    ]
+    # Bonnet: the reference has a power dome, not a flat plate.  Blend it in
+    # ahead of the cowl so the roof keeps its own gentle crown.
+    hood = _smoothstep(240.0, 300.0, x)
+    ctrl += [
+        (w_roof * 0.80, z_roof + 0.4 - 3.4 * hood),
+        (w_roof * 0.50, z_roof + 1.6 - 0.6 * hood),
+        (w_roof * 0.22, z_roof + 1.9 + 0.7 * hood),
+        (0.0, z_roof + 2.0 + 0.2 * hood),
     ]
     ctrl = np.asarray(ctrl, dtype=float)
     # keep the polyline strictly increasing in arc length
@@ -377,6 +441,7 @@ def body_section(params, x, n_half=64):
     fy = PchipInterpolator(d, ctrl[:, 0])
     fz = PchipInterpolator(d, ctrl[:, 1])
     half = np.column_stack([fy(t), fz(t)])
+    half[:, 0] += flank_relief(x, half[:, 1], z0, z_belt)
     full = np.vstack([half, np.column_stack([-half[-2:0:-1, 0], half[-2:0:-1, 1]])])
     return np.column_stack([np.full(len(full), x), full[:, 0], full[:, 1]])
 
@@ -387,7 +452,7 @@ def build_body_shell():
         np.linspace(-450, -420, 9),
         np.linspace(-420, -330, 19)[1:],
         np.linspace(-330, 58, 30)[1:],
-        np.linspace(58, 245, 34)[1:],
+        np.linspace(58, 245, 56)[1:],
         np.linspace(245, 410, 18)[1:],
         np.linspace(410, 450, 11)[1:],
     ]))
@@ -412,8 +477,19 @@ def _mono_z_of_y(pts):
     return PchipInterpolator(y[keep], z[keep]), y[keep].min(), y[keep].max()
 
 
+def _span_at(poly, x):
+    from shapely.geometry import LineString
+    ylo, zlo, yhi, zhi = poly.bounds
+    seg = poly.intersection(LineString([(x, zlo - 2.0), (x, zhi + 2.0)]))
+    if seg.is_empty:
+        return None
+    pts = np.asarray(seg.coords if hasattr(seg, 'coords') else
+                     np.vstack([np.asarray(g.coords) for g in seg.geoms]))
+    return float(pts[:, 1].min()), float(pts[:, 1].max())
+
+
 def side_pocket(params, xa, xb, f_lo, f_hi, depth=3.0, taper_front=None,
-                taper_rear=None, nx=26, nz=9, n_half=84):
+                taper_rear=None, nx=26, nz=9, n_half=84, corner=7.0, draft=1.3):
     """Pocket that follows the greenhouse side surface.
 
     f_lo/f_hi are heights as a fraction of the local greenhouse, either
@@ -421,15 +497,14 @@ def side_pocket(params, xa, xb, f_lo, f_hi, depth=3.0, taper_front=None,
     describing a slanted pillar edge: the glass top is limited to
     z_tip + slope * (x_tip - x).
     """
-    rings = []
-    for x in np.linspace(xa, xb, nx):
-        sec = body_section(params, x, n_half=n_half)[:n_half]
+    # 1. footprint of the opening in the (x, z) unwrap of the flank
+    foot = []
+    for x in np.linspace(xa, xb, max(nx * 2, 24)):
         z0, w_sill, w_max, z_hip, w_belt, z_belt, w_roof, z_roof = [float(f(x)) for f in params]
         z_roof = max(z_roof, z_belt + 1.2)
         gh = z_roof - z_belt
         if gh < 12.0:
             continue
-        yz, zmin, zmax = _mono_y_of_z(sec[sec[:, 2] >= z_belt - 2.0])
         lo = z_belt + gh * (f_lo(x) if callable(f_lo) else f_lo)
         hi = z_belt + gh * (f_hi(x) if callable(f_hi) else f_hi)
         if taper_front is not None:
@@ -438,14 +513,43 @@ def side_pocket(params, xa, xb, f_lo, f_hi, depth=3.0, taper_front=None,
         if taper_rear is not None:
             xt, sl, zt = taper_rear
             hi = min(hi, zt + sl * (x - xt))
-        lo = max(lo, zmin + 0.4)
-        hi = min(hi, zmax - 0.4)
         if hi - lo < 2.0:
             continue
-        zz = np.linspace(lo, hi, nz)
-        yy = yz(zz)
-        inner = np.column_stack([np.full(nz, x), yy - depth, zz])
-        outer = np.column_stack([np.full(nz, x), yy + 70.0, zz])
+        foot.append((x, lo, hi))
+    if len(foot) < 3:
+        return None
+    outline = ([(f[0], f[1]) for f in foot] + [(f[0], f[2]) for f in foot[::-1]])
+    poly = Polygon(outline)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    # 2. round the corners of the opening; a raw quadrilateral is what made
+    #    the glass look like a flat sticker with knife corners
+    if corner > 0:
+        rounded = poly.buffer(-corner, join_style=1).buffer(corner, join_style=1)
+        if not rounded.is_empty and rounded.area > 0.5 * poly.area:
+            poly = rounded
+    floor = poly.buffer(-draft, join_style=1) if draft > 0 else poly
+    if floor.is_empty or floor.area < 1.0:
+        floor = poly
+    px0, pz0, px1, pz1 = poly.bounds
+    rings = []
+    for x in np.linspace(px0 + 0.25, px1 - 0.25, nx):
+        span = _span_at(poly, x)
+        if span is None or span[1] - span[0] < 1.0:
+            continue
+        sec = body_section(params, x, n_half=n_half)[:n_half]
+        z_belt = float(params[5](x))
+        yz, zmin, zmax = _mono_y_of_z(sec[sec[:, 2] >= z_belt - 2.0])
+        lo, hi = max(span[0], zmin + 0.4), min(span[1], zmax - 0.4)
+        if hi - lo < 2.0:
+            continue
+        inner_span = _span_at(floor, x)
+        if inner_span is None or inner_span[1] - inner_span[0] < 0.35 * (hi - lo):
+            inner_span = (lo + 0.30 * (hi - lo), hi - 0.30 * (hi - lo))
+        zi = np.linspace(max(inner_span[0], lo + 0.05), min(inner_span[1], hi - 0.05), nz)
+        zo = np.linspace(lo, hi, nz)
+        inner = np.column_stack([np.full(nz, x), yz(zi) - depth, zi])
+        outer = np.column_stack([np.full(nz, x), yz(zo) + 70.0, zo])
         rings.append(np.vstack([inner, outer[::-1]]))
     if len(rings) < 2:
         return None
@@ -493,23 +597,24 @@ def glazing_cutters():
     for xa, xb, tf, tr in (
         (10.0, 171.0, (190.0, 1.15, 218.0), None),
         (-168.0, -12.0, None, None),
-        (-311.0, -190.0, None, (-320.0, 0.95, 222.0)),
+        (-300.0, -196.0, None, (-308.0, 1.05, 224.0)),
     ):
-        got = side_pocket(params, xa, xb, 0.10, 0.90, depth=3.2,
-                          taper_front=tf, taper_rear=tr, nx=34, nz=12)
+        got = side_pocket(params, xa, xb, 0.065, 0.960, depth=3.4,
+                          taper_front=tf, taper_rear=tr, nx=34, nz=12,
+                          corner=6.5, draft=1.4)
         if got:
             cuts += got
     # windshield and rear glass
     ws = top_pocket(params, 72.0, 236.0, lambda x: 104.0 + (x - 72.0) / 164.0 * 44.0,
-                    depth=3.0, nx=52, ny=25, end_taper=0.08)
+                    depth=3.0, nx=64, ny=49, end_taper=0.08)
     if ws is not None:
         cuts.append(ws)
     rg = top_pocket(params, -428.0, -344.0, lambda x: 108.0 + (-344.0 - x) / 84.0 * 30.0,
-                    depth=3.0, nx=34, ny=25, end_taper=0.08)
+                    depth=3.0, nx=44, ny=41, end_taper=0.08)
     if rg is not None:
         cuts.append(rg)
     # panoramic roof panel
-    roof = top_pocket(params, -258.0, 34.0, 92.0, depth=2.2, end_taper=0.06)
+    roof = top_pocket(params, -258.0, 34.0, 92.0, depth=2.2, nx=40, ny=31, end_taper=0.06)
     if roof is not None:
         cuts.append(roof)
     return cuts
@@ -530,18 +635,25 @@ def wheel_arch_cutters(radius=None, inner_y=96.0):
 def arch_cladding():
     """Black-look arch lip: a thin band following each wheel opening."""
     parts = []
-    r_in = PROPORTIONS['arch_radius']
-    r_out = r_in + 7.0
+    params = _interp_stations()
+    # the lip overhangs the opening by 2: starting it exactly on the arch
+    # cylinder puts its inner edge tangentially on the cut surface, which
+    # leaves slivers once the band straddles the swollen fender
+    r_in = PROPORTIONS['arch_radius'] - 2.0
+    r_out = PROPORTIONS['arch_radius'] + 8.0
     mid_r = (r_in + r_out) / 2.0
     for ax in (PROPORTIONS['axle_front_x'], PROPORTIONS['axle_rear_x']):
         for side in (-1, 1):
-            a = np.radians(np.linspace(8.0, 172.0, 48))
-            path = np.column_stack([
-                ax + mid_r * np.cos(a),
-                np.full_like(a, side * 171.0),
-                PROPORTIONS['tyre_radius'] + mid_r * np.sin(a),
-            ])
-            band = sweep(path, rounded_section(28.0, r_out - r_in, r=2.0, n=5))
+            a = np.radians(np.linspace(6.0, 174.0, 56))
+            px = ax + mid_r * np.cos(a)
+            pz = PROPORTIONS['tyre_radius'] + mid_r * np.sin(a)
+            # the fender now swells, so a constant-Y band would sink into it;
+            # ride the measured skin instead, straddling it so the union is a
+            # transversal crossing rather than a tangential graze
+            py = np.array([side_y(params, float(xx), float(zz)) - 2.0
+                           for xx, zz in zip(px, pz)])
+            path = np.column_stack([px, side * py, pz])
+            band = sweep(path, rounded_section(20.0, r_out - r_in, r=2.5, n=6))
             parts.append(band)
     return parts
 
@@ -742,7 +854,7 @@ def front_fasia_cutters():
         _fcut([(-52, 98), (52, 98), (52, 130), (-52, 130)], _FRONT_DEPTH['plate']),
     ]
     for s in (-1, 1):
-        cuts.append(_fcut([(s * 124, 78), (s * 156, 84), (s * 154, 116), (s * 126, 120)],
+        cuts.append(_fcut([(s * 120, 80), (s * 146, 86), (s * 144, 116), (s * 122, 120)],
                           _FRONT_DEPTH['vent']))
     return [c for c in cuts if c is not None]
 
@@ -786,7 +898,7 @@ def front_fasia_addons():
     if plate is not None:
         adds.append(plate)
     for s in (-1, 1):
-        vent = _finsert([(s * 124, 78), (s * 156, 84), (s * 154, 116), (s * 126, 120)],
+        vent = _finsert([(s * 120, 80), (s * 146, 86), (s * 144, 116), (s * 122, 120)],
                         _FRONT_DEPTH['vent'], recess=1.6)
         if vent is not None:
             adds.append(vent)
@@ -911,10 +1023,10 @@ def rear_addons():
 def flank_cutters():
     params = _interp_stations()
     cuts = []
-    cuts += groove_along_side(params, -412.0, 414.0, lambda x: 152.0 + 0.008 * x,
-                              depth=2.0, width=3.2, nx=70)
-    cuts += groove_along_side(params, -300.0, 300.0, lambda x: 74.0,
-                              depth=1.6, width=2.6, nx=50)
+    cuts += groove_along_side(params, -412.0, 418.0, lambda x: 189.0 + 0.006 * x,
+                              depth=2.6, width=3.6, nx=80)
+    cuts += groove_along_side(params, -300.0, 300.0, lambda x: 116.0,
+                              depth=1.8, width=3.0, nx=60)
     for xz in (lambda z: 178.0 - (z - 60.0) * 0.06,
                lambda z: 2.0,
                lambda z: -178.0 + (z - 60.0) * 0.03):
@@ -924,12 +1036,15 @@ def flank_cutters():
     cuts.append(flap)
     for s in (-1, 1):
         xs = np.linspace(258.0, 432.0, 30)
-        path = np.array([[x, s * 58.0, roof_z(params, x, 58.0) + 1.0] for x in xs])
-        cuts.append(sweep(path, rounded_section(4.0, 2.6, r=0.9, n=4)))
+        # sit the crease cutter INTO the bonnet, not on it: centred on the
+        # skin it only grazes, and the graze turns into slivers as soon as the
+        # dome curvature changes along the path
+        path = np.array([[x, s * 58.0, roof_z(params, x, 58.0) + 0.2] for x in xs])
+        cuts.append(sweep(path, rounded_section(4.0, 3.2, r=1.0, n=5)))
         xs = np.linspace(252.0, 436.0, 30)
         path = np.array([[x, s * (float(params[6](x)) - 6.0),
-                          roof_z(params, x, float(params[6](x)) - 6.0) + 1.0] for x in xs])
-        cuts.append(sweep(path, rounded_section(3.4, 2.4, r=0.8, n=4)))
+                          roof_z(params, x, float(params[6](x)) - 6.0) + 0.2] for x in xs])
+        cuts.append(sweep(path, rounded_section(3.4, 3.0, r=0.9, n=5)))
     return cuts
 
 
@@ -986,6 +1101,10 @@ def roof_rails():
 # --------------------------------------------------------------------------
 def build(parts='body'):
     body = build_body_shell()
+    # NB: a plan-view rounding prism was tried here and dropped.  The loft
+    # already narrows towards the ends faster than any arc that is tangent to
+    # the flank, so the prism could only meet the body in a step, leaving a
+    # ledge on the rear fender.  The end widths are shaped in STATIONS instead.
     body = boolean('inter', [body, side_envelope_prism()])
     body = boolean('diff', [body] + wheel_arch_cutters())
     body = boolean('union', [body] + arch_cladding())

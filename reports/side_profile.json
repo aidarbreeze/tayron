@@ -65,8 +65,8 @@
   {
     "x": -275.0,
     "photo_top": 317.7,
-    "model_top": 311.5,
-    "d_top": -6.2,
+    "model_top": 311.1,
+    "d_top": -6.6,
     "photo_bottom": 0.0,
     "model_bottom": 0.0,
     "d_bottom": 0.0
@@ -92,8 +92,8 @@
   {
     "x": -200.0,
     "photo_top": 328.5,
-    "model_top": 324.3,
-    "d_top": -4.1,
+    "model_top": 323.5,
+    "d_top": -5.0,
     "photo_bottom": 8.7,
     "model_bottom": 49.4,
     "d_bottom": 40.6
@@ -110,8 +110,8 @@
   {
     "x": -150.0,
     "photo_top": 331.0,
-    "model_top": 328.1,
-    "d_top": -2.9,
+    "model_top": 327.2,
+    "d_top": -3.7,
     "photo_bottom": 47.7,
     "model_bottom": 49.4,
     "d_bottom": 1.7
@@ -128,8 +128,8 @@
   {
     "x": -100.0,
     "photo_top": 332.6,
-    "model_top": 330.1,
-    "d_top": -2.5,
+    "model_top": 329.7,
+    "d_top": -2.9,
     "photo_bottom": 49.8,
     "model_bottom": 49.4,
     "d_bottom": -0.4
@@ -146,8 +146,8 @@
   {
     "x": -50.0,
     "photo_top": 332.6,
-    "model_top": 329.7,
-    "d_top": -2.9,
+    "model_top": 328.9,
+    "d_top": -3.7,
     "photo_bottom": 50.2,
     "model_bottom": 49.4,
     "d_bottom": -0.8
@@ -173,8 +173,8 @@
   {
     "x": 25.0,
     "photo_top": 323.5,
-    "model_top": 322.7,
-    "d_top": -0.8,
+    "model_top": 321.8,
+    "d_top": -1.7,
     "photo_bottom": 50.6,
     "model_bottom": 49.4,
     "d_bottom": -1.2
@@ -200,8 +200,8 @@
   {
     "x": 100.0,
     "photo_top": 297.0,
-    "model_top": 295.3,
-    "d_top": -1.7,
+    "model_top": 294.9,
+    "d_top": -2.1,
     "photo_bottom": 48.9,
     "model_bottom": 49.4,
     "d_bottom": 0.4
@@ -209,8 +209,8 @@
   {
     "x": 125.0,
     "photo_top": 282.9,
-    "model_top": 282.9,
-    "d_top": 0.0,
+    "model_top": 282.4,
+    "d_top": -0.4,
     "photo_bottom": 48.5,
     "model_bottom": 49.4,
     "d_bottom": 0.8
@@ -218,8 +218,8 @@
   {
     "x": 150.0,
     "photo_top": 268.3,
-    "model_top": 267.9,
-    "d_top": -0.4,
+    "model_top": 267.5,
+    "d_top": -0.8,
     "photo_bottom": 48.1,
     "model_bottom": 49.4,
     "d_bottom": 1.2
@@ -227,8 +227,8 @@
   {
     "x": 175.0,
     "photo_top": 253.0,
-    "model_top": 251.8,
-    "d_top": -1.2,
+    "model_top": 251.3,
+    "d_top": -1.7,
     "photo_bottom": 47.7,
     "model_bottom": 49.4,
     "d_bottom": 1.7
@@ -236,8 +236,8 @@
   {
     "x": 200.0,
     "photo_top": 236.8,
-    "model_top": 235.2,
-    "d_top": -1.7,
+    "model_top": 234.3,
+    "d_top": -2.5,
     "photo_bottom": 36.5,
     "model_bottom": 49.4,
     "d_bottom": 12.9
@@ -245,8 +245,8 @@
   {
     "x": 225.0,
     "photo_top": 222.3,
-    "model_top": 220.2,
-    "d_top": -2.1,
+    "model_top": 219.8,
+    "d_top": -2.5,
     "photo_bottom": 8.7,
     "model_bottom": 29.4,
     "d_bottom": 20.7
@@ -263,8 +263,8 @@
   {
     "x": 275.0,
     "photo_top": 215.3,
-    "model_top": 211.5,
-    "d_top": -3.7,
+    "model_top": 212.4,
+    "d_top": -2.9,
     "photo_bottom": 3.7,
     "model_bottom": 0.4,
     "d_bottom": -3.3
@@ -272,8 +272,8 @@
   {
     "x": 300.0,
     "photo_top": 213.2,
-    "model_top": 211.1,
-    "d_top": -2.1,
+    "model_top": 211.5,
+    "d_top": -1.7,
     "photo_bottom": 3.7,
     "model_bottom": 2.1,
     "d_bottom": -1.7
@@ -281,8 +281,8 @@
   {
     "x": 325.0,
     "photo_top": 215.3,
-    "model_top": 216.1,
-    "d_top": 0.8,
+    "model_top": 216.5,
+    "d_top": 1.2,
     "photo_bottom": 13.7,
     "model_bottom": 14.1,
     "d_bottom": 0.4
@@ -290,8 +290,8 @@
   {
     "x": 350.0,
     "photo_top": 218.2,
-    "model_top": 215.3,
-    "d_top": -2.9,
+    "model_top": 216.1,
+    "d_top": -2.1,
     "photo_bottom": 41.5,
     "model_bottom": 48.9,
     "d_bottom": 7.5
@@ -299,8 +299,8 @@
   {
     "x": 375.0,
     "photo_top": 213.2,
-    "model_top": 209.4,
-    "d_top": -3.7,
+    "model_top": 209.9,
+    "d_top": -3.3,
     "photo_bottom": 51.4,
     "model_bottom": 49.4,
     "d_bottom": -2.1
@@ -308,8 +308,8 @@
   {
     "x": 400.0,
     "photo_top": 206.1,
-    "model_top": 201.2,
-    "d_top": -5.0,
+    "model_top": 202.0,
+    "d_top": -4.1,
     "photo_bottom": 55.6,
     "model_bottom": 54.7,
     "d_bottom": -0.8
