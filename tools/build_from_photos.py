@@ -41,7 +41,7 @@ PROPORTIONS = {
     'glass_top_height': 315.4,
     'hood_cowl_height': 216.0,
     'hood_front_height': 198.0,
-    'sill_height': 40.0,
+    'sill_height': 50.0,
     'arch_radius': 84.0,
     'rear_light_bar_height': 211.0,
     'roof_half_width': 120.0,
@@ -52,6 +52,117 @@ PROPORTIONS = {
     'roof_rear_x': -330.0,
     'rear_glass_base_x': -437.0,
 }
+
+
+# --------------------------------------------------------------------------
+# Side-view envelope, measured off 1793820501.png with tools/profile_compare.py
+# --------------------------------------------------------------------------
+# The old shell ended in two planar loft caps, which is what made the car read
+# as a box: the real nose and tailgate are set back at the top and round over,
+# and only the bumpers reach the extreme length.  These two curves are the top
+# and bottom of the photographed silhouette; the shell is intersected with the
+# prism they define, so the outline matches by construction and the hard
+# end edges become smooth cylindrical round-overs.
+#
+# In the middle the ceiling is lifted out of the way: there the roof is already
+# right, and the rails / spoiler that make up the photo outline are add-ons.
+_ENV_TOP = np.array([
+    [-452.0, 136.0], [-449.0, 140.0], [-445.0, 146.0], [-441.0, 158.0],
+    [-438.0, 190.0], [-434.0, 214.0], [-429.0, 228.0], [-420.0, 236.0],
+    [-408.0, 247.0], [-396.0, 254.0], [-384.0, 263.0], [-372.0, 272.0],
+    [-362.0, 281.0], [-354.0, 294.0], [-348.0, 302.0], [-338.0, 308.0],
+    [-326.0, 313.0], [-306.0, 400.0], [300.0, 400.0], [390.0, 216.0],
+    [398.0, 210.0], [408.0, 205.0], [418.0, 198.0], [426.0, 191.0],
+    [431.0, 177.0], [435.0, 152.0], [441.0, 143.0], [446.0, 136.0],
+    [449.0, 131.0], [450.5, 118.0], [451.0, 80.0], [451.5, 71.0],
+])
+_ENV_BOT = np.array([
+    [-452.0, 107.0], [-449.0, 86.0], [-444.0, 80.0], [-438.0, 74.0],
+    [-430.0, 69.0], [-420.0, 65.0], [-410.0, 61.0], [-400.0, 58.0],
+    [-388.0, 56.0], [-375.0, 53.0], [-362.0, 50.0], [-350.0, 46.0],
+    [340.0, 46.0], [352.0, 46.0], [364.0, 45.0], [374.0, 48.0],
+    [384.0, 53.0], [394.0, 55.0], [404.0, 56.0], [414.0, 58.0],
+    [424.0, 61.0], [434.0, 63.0], [444.0, 66.0], [451.5, 69.0],
+])
+_ENV_TOP_F = PchipInterpolator(_ENV_TOP[:, 0], _ENV_TOP[:, 1])
+_ENV_BOT_F = PchipInterpolator(_ENV_BOT[:, 0], _ENV_BOT[:, 1])
+
+
+def env_top(x):
+    return float(_ENV_TOP_F(np.clip(x, -452.0, 451.5)))
+
+
+def env_bot(x):
+    return float(_ENV_BOT_F(np.clip(x, -452.0, 451.5)))
+
+
+def side_envelope_prism(y_half=260.0, n=520):
+    xs = np.linspace(-452.0, 451.5, n)
+    top = _ENV_TOP_F(xs)
+    bot = _ENV_BOT_F(xs)
+    outline = np.vstack([np.column_stack([xs, top]),
+                         np.column_stack([xs[::-1], bot[::-1]])])
+    return prism(outline, -y_half, y_half)
+
+
+# X of the nose / tailgate skin at a given height, read off the same envelope.
+# Every fascia detail is placed against this, so nothing floats off the shell
+# once the ends stop being flat walls.
+_FRONT_SKIN = np.array([
+    [69.0, 451.0], [80.0, 451.0], [100.0, 450.8], [118.0, 450.5],
+    [131.0, 449.0], [136.0, 446.0], [143.0, 441.0], [152.0, 435.0],
+    [165.0, 433.0], [177.0, 431.0], [191.0, 426.0], [198.0, 418.0],
+    [205.0, 408.0], [210.0, 398.0], [216.0, 390.0],
+])
+_REAR_SKIN = np.array([
+    [107.0, -452.0], [120.0, -452.0], [136.0, -451.5], [141.0, -449.0],
+    [146.0, -445.0], [158.0, -441.0], [175.0, -439.0], [190.0, -438.0],
+    [205.0, -436.0], [214.0, -434.0], [228.0, -429.0], [236.0, -420.0],
+])
+_FRONT_SKIN_F = PchipInterpolator(_FRONT_SKIN[:, 0], _FRONT_SKIN[:, 1])
+_REAR_SKIN_F = PchipInterpolator(_REAR_SKIN[:, 0], _REAR_SKIN[:, 1])
+
+
+def front_skin_x(z):
+    return float(_FRONT_SKIN_F(np.clip(z, 69.0, 216.0)))
+
+
+def rear_skin_x(z):
+    return float(_REAR_SKIN_F(np.clip(z, 107.0, 236.0)))
+
+
+def x_skin_prism(points_yz, back_f, outer_f, nz=26):
+    """Prism along X whose two end faces follow the skin instead of a plane.
+
+    back_f(z) and outer_f(z) give the inner and outer X at each height.  A
+    pocket cut with this follows the round-over of the nose; an insert built
+    with it ends up flush with the painted surface at every height, which a
+    flat prism cannot do once the ends are curved.
+    """
+    from shapely.geometry import LineString
+    poly = Polygon(points_yz)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    if poly.is_empty or poly.area < 0.05:
+        return None
+    ylo, zlo, yhi, zhi = poly.bounds
+    if zhi - zlo < 0.4:
+        return None
+    zs = np.linspace(zlo + 0.02, zhi - 0.02, max(int(nz), 3))
+    rings = []
+    for z in zs:
+        seg = poly.intersection(LineString([(ylo - 2.0, z), (yhi + 2.0, z)]))
+        if seg.is_empty:
+            return None
+        ys = np.asarray(seg.coords if hasattr(seg, 'coords') else
+                        np.vstack([np.asarray(g.coords) for g in seg.geoms]))[:, 0]
+        y0, y1 = float(ys.min()), float(ys.max())
+        if y1 - y0 < 0.05:
+            return None
+        xb, xo = float(back_f(z)), float(outer_f(z))
+        rings.append([(xb, y0, z), (xo, y0, z), (xo, y1, z), (xb, y1, z)])
+    return loft(np.asarray(rings, dtype=float))
+
 
 ENGINE = 'manifold'
 
@@ -206,28 +317,29 @@ def rounded_section(w, h, r=1.0, n=6):
 # --------------------------------------------------------------------------
 # station:  x      z0    w_sill w_max z_hip w_belt z_belt w_roof z_roof
 STATIONS = np.array([
-    [-450.0,  46.0, 148.0, 170.0, 118.0, 166.0, 226.0, 150.0, 227.5],
-    [-444.0,  41.0, 160.0, 178.0, 120.0, 173.0, 227.0, 152.0, 231.0],
-    [-437.0,  38.0, 168.0, 182.0, 124.0, 177.0, 227.0, 152.0, 234.0],
-    [-420.0,  37.0, 171.0, 184.0, 128.0, 179.0, 226.0, 147.0, 250.0],
-    [-395.0,  37.0, 172.0, 184.0, 130.0, 179.0, 224.0, 138.0, 272.0],
-    [-365.0,  38.0, 170.0, 184.0, 130.0, 178.0, 222.0, 128.0, 294.0],
-    [-330.0,  40.0, 168.0, 184.0, 130.0, 177.0, 221.0, 117.0, 301.0],
-    [-280.0,  40.0, 166.0, 184.0, 130.0, 176.0, 220.0, 117.0, 310.0],
-    [-200.0,  40.0, 166.0, 184.0, 130.0, 175.0, 219.0, 118.5, 316.0],
-    [-100.0,  40.0, 166.0, 183.5, 130.0, 174.5, 218.5, 120.0, 321.5],
-    [0.0,     40.0, 166.0, 183.0, 130.0, 174.0, 218.0, 120.0, 322.0],
-    [58.0,    40.0, 166.0, 183.0, 130.0, 174.0, 218.0, 121.0, 320.0],
-    [110.0,   40.0, 166.0, 183.0, 130.0, 173.5, 217.5, 132.0, 296.0],
-    [160.0,   40.0, 166.0, 182.5, 130.0, 173.0, 217.0, 146.0, 264.0],
-    [205.0,   40.0, 165.0, 181.5, 129.0, 172.0, 216.5, 158.0, 234.0],
-    [245.0,   41.0, 164.0, 180.0, 128.0, 171.0, 210.0, 163.0, 216.0],
-    [300.0,   41.0, 163.0, 179.0, 126.0, 170.0, 205.0, 162.0, 211.0],
-    [360.0,   40.0, 161.0, 177.5, 123.0, 168.0, 200.0, 160.0, 206.0],
-    [410.0,   40.0, 159.0, 176.0, 120.0, 166.0, 195.0, 158.0, 201.0],
-    [437.0,   42.0, 155.0, 173.0, 118.0, 163.0, 191.0, 155.0, 197.0],
-    [446.0,   46.0, 148.0, 167.0, 118.0, 158.0, 189.0, 150.0, 195.0],
-    [450.0,   52.0, 138.0, 156.0, 118.0, 148.0, 187.0, 140.0, 193.0],
+    [-450.0,  96.0, 148.0, 170.0, 118.0, 166.0, 226.0, 150.0, 227.5],
+    [-444.0,  74.0, 160.0, 178.0, 120.0, 173.0, 227.0, 152.0, 231.0],
+    [-437.0,  66.0, 168.0, 182.0, 124.0, 177.0, 227.0, 152.0, 234.0],
+    [-420.0,  60.0, 171.0, 184.0, 128.0, 179.0, 226.0, 147.0, 248.0],
+    [-395.0,  54.0, 172.0, 184.0, 130.0, 179.0, 224.0, 138.0, 268.0],
+    [-365.0,  50.0, 170.0, 184.0, 130.0, 178.0, 222.0, 128.0, 290.0],
+    [-330.0,  50.0, 168.0, 184.0, 130.0, 177.0, 221.0, 117.0, 301.0],
+    [-280.0,  50.0, 166.0, 184.0, 130.0, 176.0, 220.0, 117.0, 310.0],
+    [-200.0,  50.0, 166.0, 184.0, 130.0, 175.0, 219.0, 118.5, 317.0],
+    [-100.0,  50.0, 166.0, 183.5, 130.0, 174.5, 218.5, 120.0, 322.5],
+    [0.0,     50.0, 166.0, 183.0, 130.0, 174.0, 218.0, 120.0, 320.0],
+    [58.0,    50.0, 166.0, 183.0, 130.0, 174.0, 218.0, 121.0, 314.0],
+    [110.0,   50.0, 166.0, 183.0, 130.0, 173.5, 217.5, 132.0, 293.0],
+    [160.0,   50.0, 166.0, 182.5, 130.0, 173.0, 217.0, 146.0, 264.0],
+    [205.0,   50.0, 165.0, 181.5, 129.0, 172.0, 216.5, 158.0, 234.0],
+    [245.0,   50.0, 164.0, 180.0, 128.0, 171.0, 210.0, 163.0, 215.0],
+    [300.0,   50.0, 163.0, 179.0, 126.0, 170.0, 205.0, 162.0, 211.5],
+    [335.0,   50.0, 162.0, 178.5, 125.0, 169.0, 202.0, 161.0, 218.0],
+    [360.0,   50.0, 161.0, 177.5, 123.0, 168.0, 200.0, 160.0, 214.5],
+    [410.0,   50.0, 159.0, 176.0, 120.0, 166.0, 195.0, 158.0, 200.0],
+    [437.0,   52.0, 155.0, 173.0, 118.0, 163.0, 191.0, 155.0, 197.0],
+    [446.0,   56.0, 148.0, 167.0, 118.0, 158.0, 189.0, 150.0, 195.0],
+    [450.0,   60.0, 138.0, 156.0, 118.0, 148.0, 187.0, 140.0, 193.0],
 ])
 
 
@@ -365,7 +477,7 @@ def top_pocket(params, xa, xb, half_width, depth=3.0, nx=30, ny=15, n_half=84,
         if w < 4.0:
             continue
         yy = np.linspace(-w, w, ny)
-        zz = zy(np.abs(yy))
+        zz = np.minimum(zy(np.abs(yy)), env_top(x) - 0.6)
         inner = np.column_stack([np.full(ny, x), yy, zz - depth])
         outer = np.column_stack([np.full(ny, x), yy, zz + 70.0])
         rings.append(np.vstack([inner, outer[::-1]]))
@@ -545,7 +657,8 @@ def groove_vertical(params, x_of_z, za, zb, depth=1.6, width=2.6, nz=30):
     return out
 
 
-def lattice_bars(outline_yz, spacing, thickness, x_center, depth, span=260.0):
+def lattice_bars(outline_yz, spacing, thickness, skin_f, depth=5.0, span=260.0,
+                 sign=1.0):
     """Diamond mesh trimmed in 2-D, then extruded along X.
 
     Trimming with shapely instead of a 3-D clip avoids the coplanar slivers a
@@ -558,11 +671,15 @@ def lattice_bars(outline_yz, spacing, thickness, x_center, depth, span=260.0):
     ylo, zlo, yhi, zhi = poly.bounds
     bars = []
     n = int((yhi - ylo + 2 * (zhi - zlo)) / spacing) + 2
-    for fam, sign in ((0, 1.0), (1, -1.0)):
-        xc = x_center + fam * 0.45
+    for fam, slope in ((0, 1.0), (1, -1.0)):
+        # the two families are offset in X so their front faces are never
+        # coplanar where they cross - that is what left boundary edges before
+        stagger = sign * fam * 0.45
+        xc = None
         for k in range(-n, n + 1):
             c = (ylo + yhi) / 2.0 + k * spacing
-            line = LineString([(c - span, zlo - span * sign), (c + span, zhi + (zhi - zlo) + span * sign)])
+            line = LineString([(c - span, zlo - span * slope),
+                               (c + span, zhi + (zhi - zlo) + span * slope)])
             piece = line.buffer(thickness / 2.0, cap_style=2).intersection(poly)
             if piece.is_empty:
                 continue
@@ -571,8 +688,12 @@ def lattice_bars(outline_yz, spacing, thickness, x_center, depth, span=260.0):
                 if g.area < 0.4:
                     continue
                 pts = np.asarray(g.exterior.coords)[:-1]
-                bars.append(x_cut(pts, xc - depth / 2.0, xc + depth / 2.0))
-    return bars
+                bar = x_skin_prism(pts,
+                                   lambda z: skin_f(z) - sign * depth,
+                                   lambda z: skin_f(z) + stagger, nz=8)
+                if bar is not None:
+                    bars.append(bar)
+    return [b for b in bars if b is not None]
 
 
 def x_cut(points_yz, x_floor, x_out=520.0):
@@ -592,80 +713,191 @@ def x_cut(points_yz, x_floor, x_out=520.0):
 # --------------------------------------------------------------------------
 # Front fascia
 # --------------------------------------------------------------------------
+_FRONT_DEPTH = {'upper': 6.0, 'lower': 7.0, 'plate': 3.0, 'vent': 6.0}
+
+
+def _fcut(outline, depth):
+    return x_skin_prism(outline,
+                        lambda z: front_skin_x(z) - depth,
+                        lambda z: front_skin_x(z) + 80.0)
+
+
+def _finsert(outline, depth, recess=0.7, gap=0.9):
+    """Panel that fills its pocket and ends flush with the curved nose."""
+    poly = Polygon(outline)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    poly = poly.buffer(-gap, join_style=2)
+    if poly.is_empty:
+        return None
+    return x_skin_prism(np.asarray(poly.exterior.coords)[:-1],
+                        lambda z: front_skin_x(z) - depth - 2.5,
+                        lambda z: front_skin_x(z) - recess)
+
+
 def front_fasia_cutters():
     cuts = [
-        x_cut([(-166, 152), (166, 152), (168, 191), (-168, 191)], 444.5),
-        x_cut([(-104, 70), (104, 70), (120, 126), (-120, 126)], 444.0),
-        x_cut([(-52, 96), (52, 96), (52, 130), (-52, 130)], 447.0),
+        _fcut([(-160, 150), (160, 150), (162, 189), (-162, 189)], _FRONT_DEPTH['upper']),
+        _fcut([(-104, 74), (104, 74), (120, 126), (-120, 126)], _FRONT_DEPTH['lower']),
+        _fcut([(-52, 98), (52, 98), (52, 130), (-52, 130)], _FRONT_DEPTH['plate']),
     ]
     for s in (-1, 1):
-        cuts.append(x_cut([(s * 126, 72), (s * 160, 78), (s * 158, 112), (s * 128, 116)], 444.0))
-    return cuts
+        cuts.append(_fcut([(s * 124, 78), (s * 156, 84), (s * 154, 116), (s * 126, 120)],
+                          _FRONT_DEPTH['vent']))
+    return [c for c in cuts if c is not None]
 
 
 def front_fasia_addons():
     adds = []
-    adds += lattice_bars([(-111, 154.5), (111, 154.5), (115, 188.5), (-115, 188.5)],
-                         spacing=13.0, thickness=2.6, x_center=446.2, depth=6.0, span=60.0)
-    adds.append(place(rounded_box([4.0, 300.0, 4.0], 1.4), [449.0, 0, 190.0]))
+    up = [(-111, 153.0), (111, 153.0), (114, 186.5), (-114, 186.5)]
+    adds += lattice_bars(up, spacing=13.0, thickness=2.6,
+                         skin_f=lambda z: front_skin_x(z) - 0.8,
+                         depth=_FRONT_DEPTH['upper'] + 2.0, span=60.0)
+    # continuous light strip across the nose, sitting on the skin
+    strip = x_skin_prism([(-152, 187.0), (152, 187.0), (152, 192.0), (-152, 192.0)],
+                         lambda z: front_skin_x(z) - 9.0,
+                         lambda z: front_skin_x(z) + 0.6, nz=6)
+    if strip is not None:
+        adds.append(strip)
     for s in (-1, 1):
         for k in range(2):
-            lens = trimesh.creation.cylinder(radius=7.5, height=9.0, sections=28)
+            zc = 169.0
+            lens = trimesh.creation.cylinder(radius=7.0, height=14.0, sections=28)
             lens.apply_transform(rot_y(90))
-            adds.append(place(lens, [444.5, s * (124.0 + k * 20.0), 170.0]))
-        adds.append(place(rounded_box([8.0, 54.0, 4.0], 1.4), [445.0, s * 136.0, 184.0]))
-        adds.append(place(rounded_box([8.0, 46.0, 3.0], 1.2), [445.0, s * 134.0, 158.0]))
-    badge = trimesh.creation.cylinder(radius=15.0, height=8.0, sections=48)
+            adds.append(place(lens, [front_skin_x(zc) - 5.0, s * (122.0 + k * 19.0), zc]))
+        for zc, hh, ww in ((183.0, 4.0, 52.0), (157.0, 3.0, 44.0)):
+            blade = x_skin_prism([(s * 134.0 - ww / 2, zc - hh / 2),
+                                  (s * 134.0 + ww / 2, zc - hh / 2),
+                                  (s * 134.0 + ww / 2, zc + hh / 2),
+                                  (s * 134.0 - ww / 2, zc + hh / 2)],
+                                 lambda z: front_skin_x(z) - 9.0,
+                                 lambda z: front_skin_x(z) + 0.4, nz=5)
+            if blade is not None:
+                adds.append(blade)
+    badge = trimesh.creation.cylinder(radius=14.0, height=12.0, sections=48)
     badge.apply_transform(rot_y(90))
-    adds.append(place(badge, [448.0, 0, 168.0]))
-    ring = boolean('diff', [trimesh.creation.cylinder(radius=15.5, height=3.0, sections=48),
-                            trimesh.creation.cylinder(radius=12.5, height=6.0, sections=48)])
+    adds.append(place(badge, [front_skin_x(167.0) - 4.0, 0, 167.0]))
+    ring = boolean('diff', [trimesh.creation.cylinder(radius=14.5, height=4.0, sections=48),
+                            trimesh.creation.cylinder(radius=11.5, height=8.0, sections=48)])
     ring.apply_transform(rot_y(90))
-    adds.append(place(ring, [450.0, 0, 168.0]))
-    adds.append(place(rounded_box([6.0, 210.0, 16.0], 4.0), [448.0, 0, 56.0]))
-    adds.append(place(rounded_box([12.0, 286.0, 14.0], 4.0), [444.0, 0, 46.0]))
-    adds += lattice_bars([(-101, 72.5), (101, 72.5), (116, 123.5), (-116, 123.5)],
-                         spacing=15.0, thickness=2.4, x_center=445.8, depth=6.0, span=70.0)
+    adds.append(place(ring, [front_skin_x(167.0) + 0.6, 0, 167.0]))
+    plate = _finsert([(-50, 100), (50, 100), (50, 128), (-50, 128)],
+                     _FRONT_DEPTH['plate'], recess=1.4)
+    if plate is not None:
+        adds.append(plate)
+    for s in (-1, 1):
+        vent = _finsert([(s * 124, 78), (s * 156, 84), (s * 154, 116), (s * 126, 120)],
+                        _FRONT_DEPTH['vent'], recess=1.6)
+        if vent is not None:
+            adds.append(vent)
+    skid = x_skin_prism([(-104, 70.0), (104, 70.0), (104, 84.0), (-104, 84.0)],
+                        lambda z: front_skin_x(z) - 6.0,
+                        lambda z: front_skin_x(z) + 0.8, nz=8)
+    if skid is not None:
+        adds.append(skid)
+    chin = x_skin_prism([(-142, 69.5), (142, 69.5), (142, 79.0), (-142, 79.0)],
+                        lambda z: front_skin_x(z) - 9.0,
+                        lambda z: front_skin_x(z) + 1.6, nz=8)
+    if chin is not None:
+        adds.append(chin)
+    adds += lattice_bars([(-101, 76.5), (101, 76.5), (116, 123.5), (-116, 123.5)],
+                         spacing=15.0, thickness=2.4,
+                         skin_f=lambda z: front_skin_x(z) - 0.9,
+                         depth=_FRONT_DEPTH['lower'] + 2.0, span=70.0)
     return adds
 
 
 # --------------------------------------------------------------------------
 # Rear fascia
 # --------------------------------------------------------------------------
+_REAR_DEPTH = {'bar': 5.0, 'cluster': 6.0, 'plate': 4.0, 'valance': 7.0}
+
+
+def _rcut(outline, depth):
+    return x_skin_prism(outline,
+                        lambda z: rear_skin_x(z) + depth,
+                        lambda z: rear_skin_x(z) - 80.0)
+
+
+def _rinsert(outline, depth, recess=0.8, gap=0.9):
+    poly = Polygon(outline)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    poly = poly.buffer(-gap, join_style=2)
+    if poly.is_empty:
+        return None
+    return x_skin_prism(np.asarray(poly.exterior.coords)[:-1],
+                        lambda z: rear_skin_x(z) + depth + 2.5,
+                        lambda z: rear_skin_x(z) + recess)
+
+
 def rear_cutters():
     cuts = [
-        x_cut([(-58, 108), (58, 108), (58, 148), (-58, 148)], -452.0, -445.0),
-        x_cut([(-108, 46), (108, 46), (98, 74), (-98, 74)], -452.0, -443.0),
+        _rcut([(-58, 150), (58, 150), (58, 186), (-58, 186)], _REAR_DEPTH['plate']),
+        _rcut([(-112, 112), (112, 112), (100, 140), (-100, 140)], _REAR_DEPTH['valance']),
     ]
     for s in (-1, 1):
-        cuts.append(x_cut([(s * 17.0, 202), (s * 162.0, 199), (s * 162.0, 219), (s * 17.0, 216)],
-                          -452.0, -444.0))
-        cuts.append(x_cut([(s * 104.0, 186), (s * 164.0, 184), (s * 164.0, 222), (s * 104.0, 224)],
-                          -452.0, -443.0))
-        cuts.append(x_cut([(s * 112, 50), (s * 150, 54), (s * 148, 72), (s * 112, 70)],
-                          -452.0, -442.0))
-    return cuts
+        cuts.append(_rcut([(s * 16.0, 203), (s * 158.0, 200), (s * 158.0, 218), (s * 16.0, 215)],
+                          _REAR_DEPTH['bar']))
+        cuts.append(_rcut([(s * 100.0, 188), (s * 160.0, 186), (s * 160.0, 222), (s * 100.0, 224)],
+                          _REAR_DEPTH['cluster']))
+        cuts.append(_rcut([(s * 112, 116), (s * 150, 120), (s * 148, 138), (s * 112, 134)],
+                          5.0))
+    return [c for c in cuts if c is not None]
 
 
 def rear_addons():
     adds = []
     for s in (-1, 1):
-        adds.append(place(rounded_box([8.0, 143.0, 6.0], 2.0), [-447.0, s * 89.0, 209.0]))
+        bar = x_skin_prism([(s * 18.0, 204.0), (s * 156.0, 201.0),
+                            (s * 156.0, 216.0), (s * 18.0, 213.0)],
+                           lambda z: rear_skin_x(z) + 7.0,
+                           lambda z: rear_skin_x(z) - 0.5, nz=10)
+        if bar is not None:
+            adds.append(bar)
+        cluster = _rinsert([(s * 100.0, 188), (s * 160.0, 186),
+                            (s * 160.0, 222), (s * 100.0, 224)],
+                           _REAR_DEPTH['cluster'], recess=1.2)
+        if cluster is not None:
+            adds.append(cluster)
         for k in range(3):
-            adds.append(place(rounded_box([8.0, 14.0, 22.0], 3.0),
-                              [-446.0, s * (116.0 + k * 17.0), 203.0]))
-        adds.append(place(rounded_box([10.0, 34.0, 14.0], 4.0), [-445.0, s * 130.0, 61.0]))
-    badge = trimesh.creation.cylinder(radius=14.0, height=5.0, sections=48)
+            yc = s * (114.0 + k * 16.0)
+            seg = x_skin_prism([(yc - 6.0, 192.0), (yc + 6.0, 192.0),
+                                (yc + 6.0, 216.0), (yc - 6.0, 216.0)],
+                               lambda z: rear_skin_x(z) + 7.0,
+                               lambda z: rear_skin_x(z) - 1.4, nz=10)
+            if seg is not None:
+                adds.append(seg)
+        pipe = trimesh.creation.cylinder(radius=8.0, height=16.0, sections=28)
+        pipe.apply_transform(rot_y(90))
+        adds.append(place(pipe, [rear_skin_x(126.0) + 3.0, s * 130.0, 126.0]))
+    badge = trimesh.creation.cylinder(radius=13.0, height=10.0, sections=48)
     badge.apply_transform(rot_y(90))
-    adds.append(place(badge, [-449.0, 0, 208.0]))
+    adds.append(place(badge, [rear_skin_x(196.0) + 3.0, 0, 196.0]))
+    plate = _rinsert([(-58, 150), (58, 150), (58, 186), (-58, 186)],
+                     _REAR_DEPTH['plate'], recess=1.5)
+    if plate is not None:
+        adds.append(plate)
     for k in range(-3, 4):
-        adds.append(place(rounded_box([9.0, 5.0, 22.0], 1.5), [-445.0, k * 26.0, 60.0]))
-    adds.append(place(rounded_box([7.0, 250.0, 10.0], 3.0), [-447.0, 0, 92.0]))
+        fin = x_skin_prism([(k * 26.0 - 2.5, 116.0), (k * 26.0 + 2.5, 116.0),
+                            (k * 26.0 + 2.5, 138.0), (k * 26.0 - 2.5, 138.0)],
+                           lambda z: rear_skin_x(z) + 10.0,
+                           lambda z: rear_skin_x(z) - 1.0, nz=8)
+        if fin is not None:
+            adds.append(fin)
+    guard = x_skin_prism([(-124.0, 141.0), (124.0, 141.0), (124.0, 150.0), (-124.0, 150.0)],
+                         lambda z: rear_skin_x(z) + 8.0,
+                         lambda z: rear_skin_x(z) - 1.2, nz=8)
+    if guard is not None:
+        adds.append(guard)
     params = _interp_stations()
     path = np.array([[-348.0 - 0.05 * abs(y), y, roof_z(params, -348.0, y) + 2.0]
                      for y in np.linspace(-132, 132, 29)])
     adds.append(sweep(path, rounded_section(26.0, 7.0, r=2.5, n=5)))
-    adds.append(place(rounded_box([3.0, 96.0, 4.0], 1.5), [-424.0, -18.0, 246.0], rot_y(-38)))
+    wiper_x = -424.0
+    wiper_z = min(env_top(wiper_x) - 2.0, roof_z(params, wiper_x, 18.0) - 1.0)
+    adds.append(place(rounded_box([3.0, 96.0, 4.0], 1.5),
+                      [wiper_x, -18.0, wiper_z], rot_y(-38)))
     adds.append(trimesh.convex.convex_hull(np.array([
         [-268, -7, 312], [-236, -7, 312], [-262, -7, 334],
         [-268, 7, 312], [-236, 7, 312], [-262, 7, 334],
@@ -686,7 +918,7 @@ def flank_cutters():
     for xz in (lambda z: 178.0 - (z - 60.0) * 0.06,
                lambda z: 2.0,
                lambda z: -178.0 + (z - 60.0) * 0.03):
-        cuts += groove_vertical(params, xz, 48.0, 214.0)
+        cuts += groove_vertical(params, xz, 56.0, 214.0)
     flap = rounded_box([30.0, 8.0, 26.0], 6.0)
     flap.apply_translation([-320.0, -(side_y(params, -320.0, 172.0) + 2.4), 172.0])
     cuts.append(flap)
@@ -724,7 +956,7 @@ def flank_addons():
         # straight sill strip between the arches; a prism crosses the flank
         # transversally, where a surface-hugging sweep would graze it and
         # leave sliver triangles in the union
-        adds.append(place(rounded_box([392.0, 16.0, 26.0], 4.0), [0.0, s * 168.0, 56.0]))
+        adds.append(place(rounded_box([392.0, 16.0, 26.0], 4.0), [0.0, s * 160.0, 64.0]))
     return adds
 
 
@@ -754,6 +986,7 @@ def roof_rails():
 # --------------------------------------------------------------------------
 def build(parts='body'):
     body = build_body_shell()
+    body = boolean('inter', [body, side_envelope_prism()])
     body = boolean('diff', [body] + wheel_arch_cutters())
     body = boolean('union', [body] + arch_cladding())
     body = boolean('diff', [body] + glazing_cutters())
@@ -770,6 +1003,19 @@ def finalize(mesh):
     Booleans leave slivers whose vertices collapse when written as float32;
     weld at 1e-4, drop the collapsed triangles and close the pinholes.
     """
+    # A number plate laid over a diamond grille seals little cells of air
+    # between the plate, the bars and the pocket floor.  Manifold represents
+    # those as inward-facing shells with negative volume: valid, but they are
+    # cavities, not parts.  Drop them so the solid is solid.
+    shells = trimesh.graph.connected_components(
+        mesh.face_adjacency, min_len=1, nodes=np.arange(len(mesh.faces)))
+    drop = np.zeros(len(mesh.faces), dtype=bool)
+    for g in shells:
+        sub = mesh.submesh([g], append=True)
+        if sub.volume < 0:
+            drop[g] = True
+    if drop.any():
+        mesh = mesh.submesh([np.where(~drop)[0]], append=True)
     # Round-trip through binary STL first: float32 storage is what the user
     # loads, so cleanup must happen on exactly those coordinates.
     m = trimesh.load(trimesh.util.wrap_as_stream(mesh.export(file_type='stl')),

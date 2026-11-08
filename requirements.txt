@@ -1,7 +1,8 @@
+Pillow
+manifold3d
+networkx
+numba
 numpy
 scipy
-trimesh>=4.0
-numba
-Pillow
 shapely
-manifold3d
+trimesh>=4.0

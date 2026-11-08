@@ -1,29 +1,29 @@
 {
   "file": "tayron from scratch.stl",
-  "sha256": "9f82c0884d3341addbf3f2f0d885c5096d27d3260b72976133ad67e15eb9733e",
+  "sha256": "003dd5c03fb204cda02ec5a620b5f2dd6e6e1d117223fcec84b3bbacc0fdb0c0",
   "units": "unspecified in STL; no automatic millimetre conversion",
-  "raw_vertices": 336540,
-  "vertices_after_index_welding": 55974,
-  "faces": 112180,
+  "raw_vertices": 350328,
+  "vertices_after_index_welding": 58306,
+  "faces": 116776,
   "bounds": [
     [
-      -451.5,
-      -204.67051696777344,
+      -456.9395751953125,
+      -204.6695098876953,
       -1.5258789289873675e-06
     ],
     [
-      452.0,
-      204.67051696777344,
+      452.6000061035156,
+      204.6695098876953,
       334.0
     ]
   ],
   "extents": [
-    903.5,
-    409.3410339355469,
+    909.5395812988281,
+    409.3390197753906,
     334.00000152587893
   ],
-  "surface_area": 1646082.8567688777,
-  "signed_volume": 68952430.39827795,
+  "surface_area": 1582840.0484040147,
+  "signed_volume": 64645955.98306519,
   "watertight": true,
   "winding_consistent": true,
   "positive_component_volumes": true,
@@ -33,24 +33,24 @@
   "duplicate_faces_after_welding": 0,
   "components": [
     {
-      "faces": 80236,
-      "vertices": 40074,
+      "faces": 84832,
+      "vertices": 42406,
       "bounds": [
         [
-          -451.5,
-          -204.67051696777344,
-          37.0
+          -456.9395751953125,
+          -204.6695098876953,
+          50.0
         ],
         [
-          452.0,
-          204.67051696777344,
+          452.6000061035156,
+          204.6695098876953,
           334.0
         ]
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 67100839.44196441,
-      "euler_number": -44
+      "signed_volume": 62794365.02675164,
+      "euler_number": -10
     },
     {
       "faces": 7986,
@@ -69,7 +69,7 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.737881351,
+      "signed_volume": 462897.7378813512,
       "euler_number": -18
     },
     {
@@ -89,7 +89,7 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.7376040709,
+      "signed_volume": 462897.7376040714,
       "euler_number": -18
     },
     {
@@ -109,7 +109,7 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.7405527017,
+      "signed_volume": 462897.74055270135,
       "euler_number": -18
     },
     {
@@ -129,14 +129,14 @@
       ],
       "watertight": true,
       "winding_consistent": true,
-      "signed_volume": 462897.74027541635,
+      "signed_volume": 462897.7402754165,
       "euler_number": -18
     }
   ],
   "edge_length_quantiles_0_50_99_100": [
-    1.7059844799040144e-05,
-    5.188235670524861,
-    63.2862163132517,
+    3.737624729588589e-05,
+    5.080284754887329,
+    77.7347646285356,
     386.4721374511719
   ],
   "notes": [
