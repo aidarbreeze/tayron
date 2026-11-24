@@ -52,13 +52,49 @@ def box_between(lo, hi):
 
 
 def as_volume(mesh):
-    """Замкнутый корректно ориентированный объём (нужно для булевых операций)."""
+    """Замкнутый корректно ориентированный объём (нужно для булевых операций).
+
+    Если меш уже корректный объём — возвращается как есть: повторная склейка
+    вершин на сложной сетке рвёт её на куски.
+    """
+    if mesh.is_volume:
+        return mesh
     m = mesh.copy()
     m.merge_vertices()
     m.remove_unreferenced_vertices()
     m.fix_normals()
     if not m.is_watertight:
         m.fill_holes()
+    return m
+
+
+def finalize(mesh):
+    """Чистка перед экспортом: выкидывает вырожденные и дублирующиеся грани.
+
+    Булевы операции иногда оставляют нулевые треугольники; в памяти меш ещё
+    замкнут, но STL не хранит индексы вершин, и после перезагрузки такой меш
+    распадается.
+    """
+    m = mesh.copy()
+    m.merge_vertices()
+    m.update_faces(m.nondegenerate_faces())
+    m.update_faces(m.unique_faces())
+    m.remove_unreferenced_vertices()
+    m.fix_normals()
+    if not m.is_watertight:
+        m.fill_holes()
+    m.merge_vertices()
+    return m
+
+
+def verify(path):
+    """Проверка уже записанного файла: перезагрузка и контроль замкнутости."""
+    m = trimesh.load(path, force='mesh')
+    m.merge_vertices()
+    m.update_faces(m.nondegenerate_faces())
+    parts = len(m.split(only_watertight=False)) if len(m.faces) < 500_000 else '—'
+    print(f'  проверка файла: граней {len(m.faces)}, watertight {m.is_watertight}, '
+          f'частей {parts}, объём {round(float(m.volume), 1)}')
     return m
 
 
@@ -80,12 +116,24 @@ MIR_HI = (7.6, 18.2, 11.2)
 # Корпус Tiguan в комле 37 x 33 — тот же калибр. Заготовку не выбрасываем,
 # а обрезаем воронкой: у двери широкая манжета, к комлю корпуса — узкое горло,
 # которое корпус наглухо проглатывает. Так стык получается без ступеньки.
-CROP_LO = (80.0, 187.5, 42.0)      # подрезка вершины заготовки
+# Манжета: гладкий лофт от овала на двери к комлю корпуса. Кольца подобраны так,
+# чтобы накрыть заготовку модели (её сечения: |Y| 172 -> ~39x48, 182 -> 35.6x34.7,
+# 186 -> 35x33) и в комле (|Y| 186) уйти внутрь корпуса (37x33).
+# (|Y|, центр X, центр Z, полуось X, полуось Z, показатель суперэллипса)
+# Кольца идут по профилю заготовки (см. её сечения выше) чуть снаружи неё,
+# поэтому манжета — «носок» на конусе: заготовка не протыкает её, а стык у
+# корпуса уходит внутрь комля.
+CUFF = [(164.0, 118.0, 74.0, 20.5, 19.5, 2.3),
+        (170.0, 118.0, 74.5, 19.5, 18.5, 2.2),
+        (175.0, 116.5, 74.0, 18.0, 18.0, 2.2),
+        (179.0, 115.5, 74.0, 16.5, 16.0, 2.1),
+        (182.5, 114.0, 74.0, 12.5, 11.5, 2.1)]
+CROP_LO = (80.0, 181.5, 42.0)      # подрезка вершины заготовки
 CROP_HI = (142.0, 305.0, 104.0)
 LEG_LO = (80.0, 175.0, 33.0)        # срез «ноги» — того, что торчит под корпусом
-LEG_HI = (142.0, 305.0, 56.4)
-ROOT_Y = 186.0                      # плоскость комля корпуса (заготовка на 187.5)
-CENTRE_XZ = (112.0, 74.0)           # центр комля = центр заготовки на этой глубине
+LEG_HI = (142.0, 305, 56.4)
+ROOT_Y = 180.0                      # плоскость комля корпуса (заготовка на 181.5)
+CENTRE_XZ = (115.0, 74.0)           # центр комля = центр заготовки на этой глубине
 SWEEP = 0.10                        # заворот корпуса назад вокруг Z, рад
 
 
@@ -97,9 +145,48 @@ def mir_cut(body, lo, hi, side):
     return as_volume(trimesh.boolean.difference([body, c], engine='manifold'))
 
 
+def sup_ring(rx, rz, n, seg=72):
+    """Суперэллипс: n = 2 — эллипс, больше — скруглённый прямоугольник."""
+    th = np.linspace(0, 2 * np.pi, seg, endpoint=False)
+    c, s_ = np.cos(th), np.sin(th)
+    x = rx * np.sign(c) * np.abs(c) ** (2.0 / n)
+    z = rz * np.sign(s_) * np.abs(s_) ** (2.0 / n)
+    return np.stack([x, z], 1)
+
+
+def cuff_mesh(side, seg=72):
+    """Замкнутая манжета вдоль Y: кольца CUFF, торцы закрыты."""
+    verts, faces = [], []
+    for y, cx, cz, rx, rz, n in CUFF:
+        for x, z in sup_ring(rx, rz, n, seg):
+            verts.append([cx + x, y * side, cz + z])
+    nr = len(CUFF)
+    for k in range(nr - 1):
+        for i in range(seg):
+            a = k * seg + i; b = k * seg + (i + 1) % seg
+            c = (k + 1) * seg + (i + 1) % seg; d = (k + 1) * seg + i
+            faces += [[a, b, c], [a, c, d]] if side > 0 else [[a, c, b], [a, d, c]]
+    c0 = len(verts); verts.append([CUFF[0][1], CUFF[0][0] * side, CUFF[0][2]])
+    c1 = len(verts); verts.append([CUFF[-1][1], CUFF[-1][0] * side, CUFF[-1][2]])
+    last = (nr - 1) * seg
+    for i in range(seg):
+        faces.append([c0, (i + 1) % seg, i] if side > 0 else [c0, i, (i + 1) % seg])
+        faces.append([c1, last + i, last + (i + 1) % seg] if side > 0
+                     else [c1, last + (i + 1) % seg, last + i])
+    return as_volume(trimesh.Trimesh(vertices=np.array(verts, float),
+                                     faces=np.array(faces), process=False))
+
+
 def carva_foot(body, side):
+    """Подрезает заготовку (вершина конуса и «нога») и возвращает (кузов, манжету).
+
+    Сама манжета — накладка поверх конуса: срезать по ней кузов нельзя, иначе
+    в двери открывается прямоугольный вырез по окну реза.
+    """
+    cuff = cuff_mesh(side)
     body = mir_cut(body, CROP_LO, CROP_HI, side)
-    return mir_cut(body, LEG_LO, LEG_HI, side)
+    body = mir_cut(body, LEG_LO, LEG_HI, side)
+    return body, cuff
 
 
 def housing_piece(tg, side):
@@ -141,9 +228,9 @@ def smooth_band(mesh, select, iterations=2, lamb=0.3):
 
 def build_mirrors(body, tg):
     for side in (+1, -1):
-        body = carva_foot(body, side)
+        body, cuff = carva_foot(body, side)
         piece = housing_piece(tg, side)
-        body = as_volume(trimesh.boolean.union([body, piece], engine='manifold'))
+        body = as_volume(trimesh.boolean.union([body, cuff, piece], engine='manifold'))
         ring_c = np.array([CENTRE_XZ[0], ROOT_Y * side, CENTRE_XZ[1]])
         body = smooth_band(body, lambda V, c=ring_c: (np.linalg.norm(V - c, axis=1) < 9.0),
                            iterations=2, lamb=0.22)
@@ -252,6 +339,7 @@ def build_wiper_front(body, tg=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default=ROOT + 'tayron_2023_optimized_v2.stl')
+    ap.add_argument('--body', default=TAYRON, help='сборка-основа (lite / 16 МБ / hires)')
     ap.add_argument('--mirrors', action='store_true')
     ap.add_argument('--wiper-r', action='store_true', help='задний дворник')
     ap.add_argument('--wiper-f', action='store_true', help='передние дворники')
@@ -260,8 +348,8 @@ def main():
 
     tg = tiguan_aligned()
     print('Tiguan выровнен: extents', np.round(tg.extents, 2), 'граней', len(tg.faces))
-    body = as_volume(trimesh.load(TAYRON, force='mesh'))
-    print('Tayron: граней', len(body.faces), 'watertight', body.is_watertight,
+    body = as_volume(trimesh.load(a.body, force='mesh'))
+    print('Tayron:', os.path.basename(a.body), 'граней', len(body.faces), 'watertight', body.is_watertight,
           'объём', round(float(body.volume), 1))
 
     if a.mirrors:
@@ -271,11 +359,13 @@ def main():
     if a.wiper_f:
         body = build_wiper_front(body, tg)
     if a.mirrors or a.wiper_r or a.wiper_f:
+        body = finalize(body)
         print('итог: граней', len(body.faces), 'watertight', body.is_watertight,
               'объём', round(float(body.volume), 1),
               'частей', len(body.split(only_watertight=False)))
         body.export(a.out)
         print('записано', a.out, round(os.path.getsize(a.out) / 1e6, 2), 'МБ')
+        verify(a.out)
 
     if a.preview:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
