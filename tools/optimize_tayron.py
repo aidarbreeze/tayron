@@ -71,20 +71,27 @@ def smooth(mesh, iters, lam=0.5, mu=-0.53, selective=True, floor=0.15, k=3.0, we
     return out
 
 
-def refine_faces(mesh, face_idx, levels=1):
+def refine_faces(mesh, face_idx=None, levels=1, zone=None):
     """Локальное уплотнение выбранных треугольников без T-стыков.
 
     Обычный subdivide(face_index=...) сшивает только внутри зоны и оставляет
     щели по её границе (меш перестаёт быть замкнутым). Здесь применяется
     red-green схема: у выбранных граней дробятся все три ребра, у соседних —
     только те, что общие с выбранными, поэтому новых «висячих» рёбер нет.
+
+    zone(centers) -> маска граней в зоне; пересчитывается на каждом уровне,
+    иначе после первой итерации индексы граней «съезжают» и уплотнение идёт
+    не там, где нужно.
     """
     m = mesh
     for _ in range(levels):
         V = m.vertices.astype(np.float64)
         F = m.faces
-        sel = np.zeros(len(F), bool)
-        sel[np.asarray(face_idx, dtype=int)] = True
+        if zone is not None:
+            sel = np.asarray(zone(m.triangles_center), dtype=bool)
+        else:
+            sel = np.zeros(len(F), bool)
+            sel[np.asarray(face_idx, dtype=int)] = True
         if not sel.any():
             return m
         # рёбра: (nF, 3) -> уникальные
@@ -304,23 +311,64 @@ def chevron(apex, base_top, base_bottom, depth=2.0, width=3.5):
     return polyline([base_top, apex, base_bottom], width=width, depth=depth)
 
 
-def apply_features(mesh, features, region, mirror=True, flip_normal=False, normal=None):
+_PHOTO_CACHE = {}
+
+
+def photo_relief(path, pick, to_px, depth=1.6, edge=0.6, units_per_px=0.325, blur=1.2):
+    """Рельеф точной формы по маске с фото.
+
+    pick(img) -> булева маска (например, «красные световоды фонаря»),
+    to_px(u, v) -> (px, py) для координат модели (u = |Y|, v = Z).
+    Внутри маски вершина утапливается на depth, край сглаживается на edge.
+    Так контур повторяет рисунок с фотографии, а не нарисованный «на глаз».
+    """
+    from PIL import Image
+    from scipy import ndimage as ndi
+    if path not in _PHOTO_CACHE:
+        _PHOTO_CACHE[path] = np.asarray(Image.open(path).convert("RGB")).astype(np.int32)
+    img = _PHOTO_CACHE[path]
+    mask = pick(img)
+    sdf = ndi.distance_transform_edt(mask) - ndi.distance_transform_edt(~mask)
+    sdf = ndi.gaussian_filter(sdf.astype(np.float32), blur)
+    h, w = sdf.shape
+
+    def f(u, v):
+        px, py = to_px(u, v)
+        px = np.clip(px, 0, w - 1.0)
+        py = np.clip(py, 0, h - 1.0)
+        d = ndi.map_coordinates(sdf, [py, px], order=1, mode="nearest") * units_per_px
+        return depth * ss(-edge, edge, d)
+    return f
+
+
+def apply_features(mesh, features, region, mirror=True, flip_normal=False, normal=None,
+                   normal_blend=None, weight=None):
     """Смещение вершины по нормали; u=|Y| (или Y), v=Z.
 
     normal задаёт единое направление смещения вместо по-вершинных нормалей:
     для почти плоской панели (корма) это единственный способ получить ровный
     рельеф — по-вершинные нормали на плотной сетке дают «рябь» из фасеток.
+    normal_blend(u) -> вес единого направления (0..1): на плоской части панели 1,
+    на скруглении к крылу 0 — там смещать можно только по реальной нормали.
     """
     v = mesh.vertices.astype(np.float64)
     if normal is None:
         n = mesh.vertex_normals
     else:
         n = np.tile(np.asarray(normal, dtype=np.float64), (len(v), 1))
+        if normal_blend is not None:
+            w = np.clip(normal_blend(np.abs(v[:, 1])), 0.0, 1.0)[:, None]
+            n = w * n + (1.0 - w) * mesh.vertex_normals
+            n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
     u = np.abs(v[:, 1]) if mirror else v[:, 1]
     vv = v[:, 2]
     disp = np.zeros(len(v))
     for f in features:
         disp += f(u, vv)
+    if weight is not None:
+        # гасим рельеф там, где панель уходит на скругление: иначе SDF-рисунок
+        # «размазывается» по касательной поверхности и даёт полосы
+        disp *= np.clip(weight(u), 0.0, 1.0)
     mask = region & (disp != 0)
     out = mesh.copy()
     out.vertices = v - n * (disp * mask)[:, None]
@@ -335,8 +383,8 @@ def front_features():
     lamp = [(109, -4.1), (132, -0.8), (151, 4.4), (158, 6.3), (161, 7.3),
             (159, -10.5), (144, -14.7), (124, -16.8), (109, -14.7)]
     feats = [
-        outline(lamp, width=1.6, depth=2.40),          # чёткий контур фары
-        dish(lamp, depth=0.80, edge=2.2),              # стекло утоплено
+        outline(lamp, width=2.4, depth=2.20),          # чёткий контур фары
+        dish(lamp, depth=0.70, edge=2.2),              # стекло утоплено
         disk((136, -8.0), 7.5, depth=1.1, edge=3.0),   # проектор
         polyline([(112, -12.6), (150, -6.0), (157, -4.5)], width=1.2, depth=1.2),  # DRL
         polyline([(110, -2.0), (150, 1.0), (158, 2.2)], width=1.4, depth=-1.0),    # хром-бровь
@@ -344,51 +392,80 @@ def front_features():
     return feats
 
 
-def rear_features():
-    """Фонари Tayron 2023 — рисунок по фото, собранный из примитивов.
+REAR_PHOTO = "reference/tayron_2023_luxury_plus_rear.png"
 
-    Координаты сняты с фотографии кормы: u = (px − 1157.5)·0.3266,
-    v = (1164 − py)/3.102. Фотомаска красного рисунка тоньше шага сетки
-    (≈0.9 юнита) и давала «рябь», поэтому тот же рисунок перерисован по
-    измерениям: утопленный блок фонаря с тонким швом-контуром (как у Тигуана),
-    сквозная красная линия через корму, крупный шеврон и вертикальная
-    красная полоса на крыле. Штрихи взяты шириной 3.5–5 юнитов — только такие
-    сетка ещё держит без фасеток.
+
+def _rear_px(u, v):
+    """(|Y|, Z) модели -> пиксели фото кормы (калибровка по фото)."""
+    return 1157.5 + u / 0.3266, 640.0 + (824.0 - v * 4.8762) / 1.572
+
+
+def _red_mask(img):
+    """Красный рисунок фонарей: световоды, «крючки», сквозная линия.
+
+    Мелкий мусор и красная окантовка эмблемы отбрасываются: у модели эмблема —
+    настоящая геометрия, рельеф поверх неё не нужен.
     """
-    lamp = [(24, 42.0), (24, 55.0), (95, 57.5), (150, 58.5), (167, 55.0),
-            (170, 45.0), (166, 41.5)]
+    from scipy import ndimage as ndi
+    r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+    m = (r > 105) & (r > g + 42) & (r > b + 42)
+    lab, n = ndi.label(m)
+    if n:
+        areas = np.bincount(lab.ravel())
+        keep = areas >= 400
+        keep[0] = False
+        m = keep[lab]
+    ys, xs = np.mgrid[0:m.shape[0], 0:m.shape[1]]
+    return m & ~(np.hypot(xs - 1163.0, ys - 1029.0) < 34.0)
+
+
+def rear_features():
+    """Фонари Tayron 2023: блок фонаря + красный рисунок ровно по фото.
+
+    Координаты связывают пиксели фото кормы с моделью:
+    px = 1157.5 + u/0.3266, py = 1164 − 3.10·v. Рисунок (крючки-световоды,
+    сквозная красная линия, полоса на крыле) берётся маской с фотографии, а не
+    рисуется «на глаз»: при шаге сетки ~0.6 юнита он держится без рябей.
+    """
+    lamp = [(24, 42.0), (24, 55.0), (95, 57.5), (150, 58.5), (164, 55.0),
+            (166.0, 45.0), (163.0, 41.5)]
+    red = photo_relief(REAR_PHOTO, _red_mask, _rear_px,
+                       depth=1.25, edge=0.7, units_per_px=0.3266, blur=1.2)
+
+    def red_soft(u, v):
+        # у скругления к крылу (u > 150) фото уже врёт: рисунок гаснет
+        return red(u, v) * (1.0 - ss(144.0, 163.0, u))
+
     feats = [
-        dish(lamp, depth=0.90, edge=1.2),       # блок фонаря
-        outline(lamp, width=1.7, depth=1.30),   # тонкий шов-контур по краю
-        polyline([(20.0, 43.0), (166.0, 43.0)], width=4.0, depth=1.35),   # красная линия
-        polyline([(146.0, 44.5), (158.5, 51.0), (146.0, 57.5)],
-                 width=3.4, depth=1.20),        # крупный шеврон
-        capsule((165.0, 42.5), (165.0, 57.0), width=4.6, depth=1.35),     # красная полоса
+        dish(lamp, depth=0.55, edge=1.2),       # блок фонаря
+        outline(lamp, width=1.7, depth=1.20),   # тонкий шов-контур по краю
+        red_soft,
     ]
     return feats
 
 
 def bumper_features():
-    """Бампер Luxury Plus по фото (пиксели фото → u=|Y|, v=Z):
-    u = (1196 − px)·0.247, v = −46 − (py − 1120)·0.2435.
+    """Бампер Luxury Plus: тёмная вставка-панель, линии по её верху и низу,
+    серебристая накладка-«крыло» под нижней решёткой и полоса по низу бампера.
 
-    Корпус ДХО в базовой модели уже вылеплен (ободок + линза + диагональный
-    световод), и он почти совпадает с фото — поэтому здесь он НЕ перерисовывается:
-    второй контур поверх первого давал «двойную» мешанину и ромбы.
-    Добавляются только элементы, которых в базе нет: тёмная вставка-панель
-    с тонкими линиями по верху и низу, серебристая накладка-«крыло» под
-    нижней решёткой и серебристая полоса по низу бампера.
+    Корпус ДХО/ПТФ в базовой модели уже вылеплен (ободок, линза, диагональный
+    световод), и его форма снята с самой геометрии: ободок u 127…172, Z −45…−90,
+    линза u 134…166, Z −52…−82. Нарисовать поверх свой «пентагон с кантом»
+    нельзя: размер корпуса сравним с радиусом угла бампера, поэтому либо
+    двойной контур, либо провал панели до 20 юнитов (проверено обоими
+    способами). Корпус оставлен как есть, добавлены только элементы фото,
+    которых в базе нет.
     """
     insert = [(18, -46), (150, -46), (166, -58), (166, -104), (150, -114),
               (-150, -114), (-166, -104), (-166, -58), (-150, -46), (-18, -46)]
     silver = [(22, -101), (105, -108), (140, -101), (150, -108), (110, -114), (22, -107)]
     bottom = [(150, -116), (172, -116), (176, -124), (-176, -124), (-170, -116), (-150, -116)]
     feats = [
-        dish(insert, depth=0.25, edge=1.5),      # чёрная вставка — едва утоплена
-        polyline([(-150, -46), (150, -46)], width=1.6, depth=0.70),   # верхняя линия
+        dish(insert, depth=0.25, edge=1.5),       # чёрная вставка — едва утоплена
+        polyline([(-150, -46), (150, -46)], width=1.6, depth=0.70),       # верхняя линия
         polyline([(-150, -114.5), (150, -114.5)], width=1.6, depth=0.70),  # нижняя линия
-        dish(silver, depth=-0.30, edge=1.2),     # серебристая накладка-«крыло»
-        dish(bottom, depth=-0.30, edge=1.2),     # серебристая полоса по низу
+        dish(silver, depth=-0.30, edge=1.2),      # серебристая накладка-«крыло»
+        dish(bottom, depth=-0.30, edge=1.2),      # серебристая полоса по низу
     ]
     return feats
 
@@ -406,9 +483,10 @@ def hidden_stub(wheel, reach=52.0, start=18.0, radius_frac=0.34, sections=48):
     return cyl
 
 
-def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces=340000,
-             detail_faces=330000, rear_refine=3,
+def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces=None,
+             detail_faces=None, rear_refine=2, lamp_refine=2, bumper_refine=0,
              with_roof=True, with_details=True, verbose=True):
+    """Сборка модели. final_faces/detail_faces=None — без лимита граней (максимум точности)."""
     t0 = time.time()
     scene = trimesh.load(src_path, force="mesh")
     parts = sorted(scene.split(only_watertight=False), key=lambda c: -len(c.faces))
@@ -435,13 +513,25 @@ def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces
     if with_details:
         body = largest_part(trimesh.Trimesh(*subdivide(body.vertices, body.faces), process=False))
         # локальное уплотнение там, где нужны тонкие штрихи: фонари (×2) и фары (×1)
-        c = body.triangles_center
-        zr = (c[:, 0] < -392) & (np.abs(c[:, 1]) < 182) & (c[:, 2] > 34) & (c[:, 2] < 66)
-        body = refine_faces(body, np.where(zr)[0], levels=rear_refine)
-        c = body.triangles_center
-        zf = ((c[:, 0] > 372) & (np.abs(c[:, 1]) > 95) & (np.abs(c[:, 1]) < 186)
-              & (c[:, 2] > -24) & (c[:, 2] < 14))
-        body = refine_faces(body, np.where(zf)[0], levels=1)
+        rear_zone = lambda c: ((c[:, 0] < -392) & (np.abs(c[:, 1]) < 182)
+                               & (c[:, 2] > 34) & (c[:, 2] < 66))
+        lamp_zone = lambda c: ((c[:, 0] > 368) & (np.abs(c[:, 1]) > 92)
+                               & (np.abs(c[:, 1]) < 190)
+                               & (c[:, 2] > -28) & (c[:, 2] < 18))
+        drl_zone = lambda c: ((c[:, 0] > 352) & (np.abs(c[:, 1]) > 90)
+                              & (np.abs(c[:, 1]) < 184)
+                              & (c[:, 2] > -110) & (c[:, 2] < -34))
+        body = refine_faces(body, levels=rear_refine, zone=rear_zone)
+        body = refine_faces(body, levels=lamp_refine, zone=lamp_zone)
+        body = refine_faces(body, levels=bumper_refine, zone=drl_zone)
+        # уплотнение само по себе НЕ сглаживает: грани делятся на копланарные
+        # куски, и плоские «плиты» базовой модели начинают читаться резче.
+        # Поэтому после уплотнения каждую зону отдельно успокаиваем Таубином:
+        # кромки «плит» скругляются, а форма панели сохраняется.
+        zones = [rear_zone, lamp_zone] + ([drl_zone] if bumper_refine else [])
+        for zone in zones:
+            body = smooth_region(body, zone(body.vertices), iters=35,
+                                 lam=0.50, mu=-0.52, feather=8)
         # выравниваем только те панели, куда ляжет гравировка — иначе фасетки
         # глушат рельеф, а сглаживание всей кормы даёт гребешки по кромкам
         vb = body.vertices
@@ -453,22 +543,28 @@ def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces
         n = body.vertex_normals
         front_region = (v[:, 0] > 370) & (n[:, 0] > 0.15)
         rear_region = (v[:, 0] < -370) & (n[:, 0] < -0.15)
-        body, m1 = apply_features(body, front_features(), front_region, mirror=True)
+        body, m1 = apply_features(body, front_features(), front_region, mirror=True,
+                                  normal=(1.0, 0.0, 0.0),
+                                  normal_blend=lambda u: 1.0 - ss(152.0, 178.0, u))
         body, m2 = apply_features(body, rear_features(), rear_region, mirror=True,
-                                  normal=(-1.0, 0.0, 0.0))
+                                  normal=(-1.0, 0.0, 0.0),
+                                  normal_blend=lambda u: 1.0 - ss(142.0, 172.0, u),
+                                  weight=lambda u: 1.0 - ss(150.0, 168.0, u))
         body, m3 = apply_features(body, bumper_features(), front_region, mirror=True)
         # после гравировки гасим фасеточную «рябь» по самому рельефу: Таубин
         # с малым весом снимает высокочастотные ступеньки, глубины остаются
         vg = body.vertices
-        etched_front = ((np.abs(vg[:, 1]) < 178) & (vg[:, 0] > 356)
-                        & (vg[:, 2] > -104) & (vg[:, 2] < -34))
+        etched_front = ((vg[:, 0] > 356) & (np.abs(vg[:, 1]) < 192) & (
+            ((vg[:, 2] > -104) & (vg[:, 2] < -34)) |
+            ((vg[:, 2] > -26) & (vg[:, 2] < 20) & (np.abs(vg[:, 1]) > 90))))
         etched_rear = ((np.abs(vg[:, 1]) < 178) & (vg[:, 0] < -390)
                        & (vg[:, 2] > 36) & (vg[:, 2] < 64))
         # после гравировки гасим фасеточную «рябь»: Таубин снимает высокочастотные
         # ступеньки сетки, а штрихи шириной 3.5–5 юнитов остаются
-        body = smooth_region(body, etched_front, iters=2, lam=0.32, mu=-0.34, feather=4)
+        body = smooth_region(body, etched_front, iters=5, lam=0.40, mu=-0.42, feather=5)
         body = smooth_region(body, etched_rear, iters=5, lam=0.45, mu=-0.47, feather=5)
-        body = decimate_safe(body, detail_faces)
+        if detail_faces:
+            body = decimate_safe(body, detail_faces)
         if verbose:
             print(f"акценты: фары {int(m1.sum())}, фонари {int(m2.sum())}, бампер {int(m3.sum())} вершин")
     if verbose:
@@ -486,7 +582,7 @@ def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces
     merged = trimesh.boolean.union([body] + wheels + stubs, engine="manifold")
     merged = max(merged.split(only_watertight=False), key=lambda c: len(c.faces))
     merged = smooth(merged, 2, lam=0.25, mu=-0.25, selective=True, floor=0.4, k=4.0)
-    if len(merged.faces) > final_faces:
+    if final_faces and len(merged.faces) > final_faces:
         merged = decimate_safe(merged, final_faces)
 
     if verbose:
@@ -507,15 +603,23 @@ def main():
     ap.add_argument("dst")
     ap.add_argument("--body-faces", type=int, default=62000)
     ap.add_argument("--wheel-faces", type=int, default=6200)
-    ap.add_argument("--final-faces", type=int, default=340000)
-    ap.add_argument("--detail-faces", type=int, default=330000)
-    ap.add_argument("--rear-refine", type=int, default=3,
-                    help="уровни уплотнения полосы задних фонарей (2–4)")
+    ap.add_argument("--final-faces", type=int, default=0,
+                    help="лимит граней итога, 0 — без лимита")
+    ap.add_argument("--detail-faces", type=int, default=0,
+                    help="лимит граней кузова до сшивки, 0 — без лимита")
+    ap.add_argument("--rear-refine", type=int, default=2,
+                    help="уровни уплотнения полосы задних фонарей")
+    ap.add_argument("--lamp-refine", type=int, default=2,
+                    help="уровни уплотнения зоны фар")
+    ap.add_argument("--bumper-refine", type=int, default=0,
+                    help="уровни уплотнения зоны ДХО (0 — не уплотнять)")
     ap.add_argument("--no-roof", action="store_true")
     ap.add_argument("--no-details", action="store_true")
     a = ap.parse_args()
-    optimize(a.src, a.dst, a.body_faces, a.wheel_faces, a.final_faces, a.detail_faces,
-             rear_refine=a.rear_refine,
+    optimize(a.src, a.dst, a.body_faces, a.wheel_faces,
+             a.final_faces or None, a.detail_faces or None,
+             rear_refine=a.rear_refine, lamp_refine=a.lamp_refine,
+             bumper_refine=a.bumper_refine,
              with_roof=not a.no_roof, with_details=not a.no_details)
 
 
