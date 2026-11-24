@@ -69,7 +69,7 @@ def _fill_nan(a):
     return np.interp(np.arange(len(a)), idx, a[idx])
 
 
-def photo_masks(view='front', bottom_clip=None):
+def photo_masks(view='front', bottom_clip=None, verbose=True):
     """Маски элементов по фото: полоса между верхом и низом корпуса фары."""
     ph = np.asarray(P.photo_crop(view, A.BBOX[view]).convert('L'), float)
     masks = []
@@ -90,9 +90,10 @@ def photo_masks(view='front', bottom_clip=None):
         m = ndi.binary_fill_holes(m)
         if bottom_clip is not None:
             m[int(bottom_clip):, :] = False
-        ys, xs = np.where(m)
-        print(f'  {name}: пикс {m.sum()}, x {xs.min()}..{xs.max()}, '
-              f'y {ys.min()}..{ys.max()} (h ≈ {int(np.nanmedian(bot - top))})')
+        if verbose:
+            ys, xs = np.where(m)
+            print(f'  {name}: пикс {m.sum()}, x {xs.min()}..{xs.max()}, '
+                  f'y {ys.min()}..{ys.max()} (h ≈ {int(np.nanmedian(bot - top))})')
         masks.append((name, m))
     return masks
 
