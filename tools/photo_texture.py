@@ -325,15 +325,115 @@ def sheet_zones(view, out, model, src, tag='v2'):
     print(out, img.size)
 
 
+
+# --------------------------------------------------- наложение в одном кадре
+# Окна зон в пикселях кадра (x0, x1, y0, y1) — те же, что в A.ROWS, но
+# обрезанные по самим элементам, чтобы наложение читалось глазами.
+OVERLAY_ZONES = {
+    'front': [('ЛЕВАЯ ФАРА', (110, 470, 430, 640)),
+              ('ПРАВАЯ ФАРА', (1010, 1370, 430, 640)),
+              ('РЕШЁТКА, ЭМБЛЕМА', (560, 920, 520, 760)),
+              ('ПТФ + НИЖНЯЯ РЕШЁТКА', (240, 700, 700, 1120))],
+    'rear': [('ЛЕВЫЙ ФОНАРЬ', (20, 470, 290, 500)),
+             ('ПРАВЫЙ ФОНАРЬ', (720, 1170, 290, 500)),
+             ('СВЕТОВАЯ ПОЛОСА, ЭМБЛЕМА', (430, 770, 320, 500)),
+             ('БАМПЕР', (40, 640, 670, 980))],
+}
+ZOOM_W = 560
+RULER_STEP, RULER_LABEL = 25, 50
+
+
+def _ruler(im, x0, y0, zoom, fnt):
+    """Наложить сетку с подписями строк кадра — чтобы сдвиг читался в пикселях."""
+    d = ImageDraw.Draw(im)
+    h = im.height
+    r = (y0 // RULER_STEP) * RULER_STEP
+    while True:
+        yy = int((r - y0) * zoom)
+        if yy > h:
+            break
+        if yy >= 0:
+            major = (r % RULER_LABEL == 0)
+            d.line([0, yy, im.width, yy], fill=(235, 60, 60) if major else (150, 150, 255), width=1)
+            if major:
+                d.text((3, max(0, yy - 9)), str(r), fill=(200, 0, 0), font=fnt)
+        r += RULER_STEP
+    return im
+
+
+def sheet_overlay(view, out, model=ROOT + 'tayron_2023_optimized_v2.stl',
+                  src=None, tag='v2', alpha=0.40, zoom=2.6):
+    """Одна картинка: фото поверх модели в одном кадре + зоны крупно с линейкой.
+
+    Верх — ровно то, что просили: фотография с прозрачностью поверх рендера
+    модели, один кадр. Низ — тот же кадр крупно по зонам, с сеткой в пикселях
+    кадра; при желании со столбцом исходного скана (--src), чтобы видеть
+    источник расхождения.
+    """
+    box = A.BBOX[view]
+    mesh = trimesh.load(model, force='mesh')
+    photo = photo_crop(view, box)
+    mrgb = render_rgb(mesh, view, box)
+    a = np.asarray(photo, float) / 255.0
+    b = np.asarray(mrgb, float) / 255.0
+    ov = Image.fromarray((((1 - alpha) * b + alpha * a).clip(0, 1) * 255).astype(np.uint8))
+    src_rgb = render_rgb(trimesh.load(src, force='mesh'), view, box) if src else None
+
+    fnt = ImageFont.truetype(FONT_B, 18)
+    fnt_s = ImageFont.truetype(FONT_B, 14)
+    cols = 3 if src_rgb is not None else 2
+    W = cols * (ZOOM_W + 4)
+    hh = int(W * photo.height / photo.width)
+    top = _cell(ov, f'ФОТО {int(alpha * 100)} % ПОВЕРХ МОДЕЛИ {tag} · {VIEW_RU[view].lower()} · '
+                     f'кадр = кроп фото, пиксель в пиксель', W, hh + 30, fnt)
+    # рамки зон на большом кадре
+    top_img = top.copy()
+    d = ImageDraw.Draw(top_img)
+    k = W / photo.width
+    for title, (x0, x1, y0, y1) in OVERLAY_ZONES[view]:
+        d.rectangle([int(x0 * k), 30 + int(y0 * k), int(x1 * k), 30 + int(y1 * k)],
+                    outline=(235, 60, 60), width=2)
+    tiles = []
+    for title, (x0, x1, y0, y1) in OVERLAY_ZONES[view]:
+        zw = ZOOM_W
+        zh = int(zw * (y1 - y0) / (x1 - x0))
+        def mk(arr):
+            c = Image.fromarray(np.asarray(arr).astype(np.uint8)).crop((x0, y0, x1, y1))
+            c = c.resize((zw, zh), Image.LANCZOS)
+            return _ruler(c, x0, y0, zw / (x1 - x0), fnt_s)
+        tiles.append([_cell(mk(photo), f'ФОТО · {title}', zw, zh + 30, fnt_s)])
+        if src_rgb is not None:
+            tiles[-1].append(_cell(mk(src_rgb), 'ИСХОДНЫЙ СКАН', zw, zh + 30, fnt_s))
+        tiles[-1].append(_cell(mk(mrgb), f'МОДЕЛЬ {tag}', zw, zh + 30, fnt_s))
+    Wtot = W
+    Htot = 46 + top_img.height + sum(t[0].height for t in tiles)
+    img = Image.new('RGB', (Wtot, Htot), '#e8e8e8')
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, Wtot, 44], fill='#0d0d0d')
+    d.text((10, 8), f'НАЛОЖЕНИЕ В ОДНОМ КАДРЕ · {VIEW_RU[view]}: фото {int(alpha * 100)} % поверх модели {tag}',
+           fill='white', font=ImageFont.truetype(FONT_B, 20))
+    img.paste(top_img, ((Wtot - W) // 2, 46))
+    y = 46 + top_img.height
+    for col_tiles in tiles:
+        for j, t in enumerate(col_tiles):
+            img.paste(t, (j * (ZOOM_W + 4), y))
+        y += col_tiles[0].height
+    img.save(out, optimize=True)
+    print(out, img.size)
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('cmd', choices=['front', 'rear', 'both', 'zones'])
+    ap.add_argument('cmd', choices=['front', 'rear', 'both', 'zones', 'overlay'])
     ap.add_argument('--model', default=ROOT + 'tayron_2023_optimized_v2.stl')
     ap.add_argument('--src', default=None, help='исходный скан для колонки «до»')
     ap.add_argument('--tag', default='v2')
     a = ap.parse_args()
     views = ('front', 'rear') if a.cmd == 'both' else ((a.cmd,) if a.cmd in ('front', 'rear') else ('front', 'rear'))
-    if a.cmd == 'zones':
+    if a.cmd == 'overlay':
+        for v in ('front', 'rear'):
+            sheet_overlay(v, ROOT + f'overlay_{v}.png', a.model, a.src, a.tag)
+    elif a.cmd == 'zones':
         for v in views:
             sheet_zones(v, ROOT + f'photo_tex_{v}_zones.png', a.model, a.src, a.tag)
     else:
