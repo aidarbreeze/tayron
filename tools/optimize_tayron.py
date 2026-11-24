@@ -70,6 +70,64 @@ def smooth(mesh, iters, lam=0.5, mu=-0.53, selective=True, floor=0.15, k=3.0, we
     return out
 
 
+def refine_faces(mesh, face_idx, levels=1):
+    """Локальное уплотнение выбранных треугольников без T-стыков.
+
+    Обычный subdivide(face_index=...) сшивает только внутри зоны и оставляет
+    щели по её границе (меш перестаёт быть замкнутым). Здесь применяется
+    red-green схема: у выбранных граней дробятся все три ребра, у соседних —
+    только те, что общие с выбранными, поэтому новых «висячих» рёбер нет.
+    """
+    m = mesh
+    for _ in range(levels):
+        V = m.vertices.astype(np.float64)
+        F = m.faces
+        sel = np.zeros(len(F), bool)
+        sel[np.asarray(face_idx, dtype=int)] = True
+        if not sel.any():
+            return m
+        # рёбра: (nF, 3) -> уникальные
+        e = np.sort(np.stack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1).reshape(-1, 2), axis=1)
+        ue, inv = np.unique(e, axis=0, return_inverse=True)
+        eid = inv.reshape(-1, 3)
+        marked = np.zeros(len(ue), bool)
+        marked[eid[sel].ravel()] = True
+        mid_index = -np.ones(len(ue), dtype=np.int64)
+        ids = np.where(marked)[0]
+        mids = 0.5 * (V[ue[ids, 0]] + V[ue[ids, 1]])
+        mid_index[ids] = np.arange(len(V), len(V) + len(ids))
+        V2 = np.vstack([V, mids]) if len(ids) else V
+
+        newf = []
+        for face, e3 in zip(F, eid):
+            mk = marked[e3]
+            k = int(mk.sum())
+            if k == 0:
+                newf.append(face)
+                continue
+            # поворачиваем так, чтобы отмеченное ребро(а) шли подряд
+            i0, i1, i2 = face
+            m01 = mid_index[e3[0]]; m12 = mid_index[e3[1]]; m20 = mid_index[e3[2]]
+            if k == 3:
+                newf += [(i0, m01, m20), (i1, m12, m01), (i2, m20, m12), (m01, m12, m20)]
+            elif k == 1:
+                if mk[0]:   # ребро 0-1
+                    newf += [(i0, m01, i2), (m01, i1, i2)]
+                elif mk[1]:  # ребро 1-2
+                    newf += [(i1, m12, i0), (m12, i2, i0)]
+                else:        # ребро 2-0
+                    newf += [(i2, m20, i1), (m20, i0, i1)]
+            else:
+                if not mk[2]:    # рёбра 0-1 и 1-2 -> угол в i1
+                    newf += [(i1, m12, m01), (i0, m01, m12), (i0, m12, i2)]
+                elif not mk[0]:  # рёбра 1-2 и 2-0 -> угол в i2
+                    newf += [(i2, m20, m12), (i1, m12, m20), (i1, m20, i0)]
+                else:            # рёбра 2-0 и 0-1 -> угол в i0
+                    newf += [(i0, m01, m20), (i2, m20, m01), (i2, m01, i1)]
+        m = trimesh.Trimesh(vertices=V2, faces=np.array(newf, dtype=np.int64), process=False)
+    return m
+
+
 def smooth_region(mesh, region, iters=8, lam=0.55, mu=-0.58, feather=6):
     """Локальное сглаживание (Таубин) только внутри region с плавным краем.
 
@@ -268,11 +326,11 @@ def front_features():
     lamp = [(109, -4.1), (132, -0.8), (151, 4.4), (158, 6.3), (161, 7.3),
             (159, -10.5), (144, -14.7), (124, -16.8), (109, -14.7)]
     feats = [
-        outline(lamp, width=2.2, depth=2.40),          # чёткий контур фары
-        dish(lamp, depth=0.80, edge=3.5),              # стекло утоплено
+        outline(lamp, width=1.6, depth=2.40),          # чёткий контур фары
+        dish(lamp, depth=0.80, edge=2.2),              # стекло утоплено
         disk((136, -8.0), 7.5, depth=1.1, edge=3.0),   # проектор
-        polyline([(112, -12.6), (150, -6.0), (157, -4.5)], width=1.8, depth=1.2),  # DRL
-        polyline([(110, -2.0), (150, 1.0), (158, 2.2)], width=2.0, depth=-1.0),    # хром-бровь
+        polyline([(112, -12.6), (150, -6.0), (157, -4.5)], width=1.2, depth=1.2),  # DRL
+        polyline([(110, -2.0), (150, 1.0), (158, 2.2)], width=1.4, depth=-1.0),    # хром-бровь
     ]
     return feats
 
@@ -288,15 +346,15 @@ def rear_features():
     band = [(12, 41.5), (60, 40.5), (110, 40), (150, 40.5), (165, 42.5),
             (170, 48), (167, 55), (152, 58.5), (110, 59), (60, 59), (12, 58)]
     feats = [
-        dish(band, depth=1.80, edge=1.2),          # полоса: контур-уступ
+        dish(band, depth=1.80, edge=1.0),          # полоса: контур-уступ
         # световоды «<»: пара у шильда и пара у края
-        chevron((40, 49.5), (56, 57.0), (56, 42.0), depth=2.00, width=3.0),
-        chevron((76, 49.5), (92, 57.0), (92, 42.0), depth=2.00, width=3.0),
-        chevron((118, 49.5), (134, 57.0), (134, 42.0), depth=2.00, width=3.0),
-        chevron((148, 49.5), (160, 56.0), (160, 43.0), depth=2.00, width=2.8),
+        chevron((40, 49.5), (56, 57.0), (56, 42.0), depth=2.00, width=1.8),
+        chevron((76, 49.5), (92, 57.0), (92, 42.0), depth=2.00, width=1.8),
+        chevron((118, 49.5), (134, 57.0), (134, 42.0), depth=2.00, width=1.8),
+        chevron((148, 49.5), (160, 56.0), (160, 43.0), depth=2.00, width=1.7),
         # светящаяся линия вдоль нижней кромки полосы
         polyline([(12, 43.0), (60, 42.5), (110, 42.2), (158, 43.0)],
-                 width=1.6, depth=1.30),
+                 width=1.2, depth=1.30),
     ]
     return feats
 
@@ -327,8 +385,8 @@ def hidden_stub(wheel, reach=52.0, start=18.0, radius_frac=0.34, sections=48):
     return cyl
 
 
-def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces=170000,
-             detail_faces=150000,
+def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces=340000,
+             detail_faces=330000,
              with_roof=True, with_details=True, verbose=True):
     t0 = time.time()
     scene = trimesh.load(src_path, force="mesh")
@@ -355,10 +413,14 @@ def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces
     # 4. акценты: уплотняем сетку, гравируем, возвращаем бюджет
     if with_details:
         body = largest_part(trimesh.Trimesh(*subdivide(body.vertices, body.faces), process=False))
-        v = body.vertices
-        n = body.vertex_normals
-        front_region = (v[:, 0] > 370) & (n[:, 0] > 0.15)
-        rear_region = (v[:, 0] < -370) & (n[:, 0] < -0.15)
+        # локальное уплотнение там, где нужны тонкие штрихи: фонари (×2) и фары (×1)
+        c = body.triangles_center
+        zr = (c[:, 0] < -392) & (np.abs(c[:, 1]) < 182) & (c[:, 2] > 34) & (c[:, 2] < 66)
+        body = refine_faces(body, np.where(zr)[0], levels=2)
+        c = body.triangles_center
+        zf = ((c[:, 0] > 372) & (np.abs(c[:, 1]) > 95) & (np.abs(c[:, 1]) < 186)
+              & (c[:, 2] > -24) & (c[:, 2] < 14))
+        body = refine_faces(body, np.where(zf)[0], levels=1)
         # выравниваем только те панели, куда ляжет гравировка — иначе фасетки
         # глушат рельеф, а сглаживание всей кормы даёт гребешки по кромкам
         vb = body.vertices
@@ -412,8 +474,8 @@ def main():
     ap.add_argument("dst")
     ap.add_argument("--body-faces", type=int, default=62000)
     ap.add_argument("--wheel-faces", type=int, default=6200)
-    ap.add_argument("--final-faces", type=int, default=170000)
-    ap.add_argument("--detail-faces", type=int, default=150000)
+    ap.add_argument("--final-faces", type=int, default=340000)
+    ap.add_argument("--detail-faces", type=int, default=330000)
     ap.add_argument("--no-roof", action="store_true")
     ap.add_argument("--no-details", action="store_true")
     a = ap.parse_args()
