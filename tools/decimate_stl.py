@@ -34,6 +34,21 @@ def main():
         target_count=a.faces)
     out = trimesh.Trimesh(vertices=v.astype(np.float64), faces=f, process=True)
     out.merge_vertices()
+    # децимация иногда оставляет 2-гранные «иголки» нулевого объёма: они делают
+    # меш незамкнутым и разваливают его на «детали» — выкидываем всё, кроме
+    # основной оболочки, и завариваем дырки
+    parts = out.split(only_watertight=False)
+    if len(parts) > 1:
+        parts.sort(key=lambda p: len(p.faces), reverse=True)
+        keep = parts[0]
+        for p in parts[1:]:
+            if len(p.faces) < 50 and abs(p.volume) < 1e-6:
+                continue
+            keep = trimesh.util.concatenate([keep, p])
+        out = keep
+        trimesh.repair.fill_holes(out)
+        trimesh.repair.fix_normals(out)
+        out.merge_vertices()
     out.export(a.dst)
 
     print(f"{len(mesh.faces)} -> {len(out.faces)} граней, "

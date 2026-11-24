@@ -69,7 +69,7 @@ def _fill_nan(a):
     return np.interp(np.arange(len(a)), idx, a[idx])
 
 
-def photo_masks(view='front'):
+def photo_masks(view='front', bottom_clip=None):
     """Маски элементов по фото: полоса между верхом и низом корпуса фары."""
     ph = np.asarray(P.photo_crop(view, A.BBOX[view]).convert('L'), float)
     masks = []
@@ -83,9 +83,13 @@ def photo_masks(view='front'):
         bot = ndi.median_filter(bot, 25)
         m = np.zeros_like(ph, bool)
         for i, x in enumerate(range(x0, x1)):
+            if bot[i] - top[i] < 20:          # на концах корпуса фары нет
+                continue
             m[int(top[i]):int(bot[i]) + 1, x] = True
         m = ndi.binary_closing(m, np.ones((3, 3)))
         m = ndi.binary_fill_holes(m)
+        if bottom_clip is not None:
+            m[int(bottom_clip):, :] = False
         ys, xs = np.where(m)
         print(f'  {name}: пикс {m.sum()}, x {xs.min()}..{xs.max()}, '
               f'y {ys.min()}..{ys.max()} (h ≈ {int(np.nanmedian(bot - top))})')
@@ -104,7 +108,7 @@ def masks_png(masks, out):
     print('маски:', out)
 
 
-def apply_depth(mesh, view, masks, depth, taper_px=TAPER_PX):
+def apply_depth(mesh, view, masks, depth, taper_px=TAPER_PX, groove_px=4.0, groove_ratio=1.6):
     """Сместить вершины внутри контуров по −X: ниша с плавным краем."""
     x0, x1, y0, y1 = A.BBOX[view]
     u_of, v_of, sx, sy = A.frame(mesh, view)
@@ -125,9 +129,11 @@ def apply_depth(mesh, view, masks, depth, taper_px=TAPER_PX):
         if not inside.any():
             continue
         d_px = dist[iy, ix]
-        # smoothstep по расстоянию до границы контура
+        # посадка: плавный вход внутрь контура + канавка-шов по краю
         t = np.clip(d_px / taper_px, 0, 1)
-        wgt = t * t * (3 - 2 * t)
+        seat = t * t * (3 - 2 * t)                      # 0 у края -> 1 внутри
+        groove = np.exp(-((d_px - groove_px) / (0.45 * taper_px)) ** 2)
+        wgt = seat + groove_ratio * groove
         wgt = np.where(inside, wgt, 0.0)
         # только передние поверхности: нормаль смотрит на камеру (+X)
         front = mesh.vertex_normals[:, 0] > 0.05
@@ -143,6 +149,43 @@ def apply_depth(mesh, view, masks, depth, taper_px=TAPER_PX):
     return out
 
 
+def _px_py(mesh, view):
+    """Пиксели кадра (кроп фото) для каждой вершины: тот же кадр, что у рендера."""
+    x0, x1, y0, y1 = A.BBOX[view]
+    u_of, v_of, sx, sy = A.frame(mesh, view)
+    u, v, _ = A.project(mesh, view)
+    # u_of(px) = u.max() − (px − x0)/sx  =>  px_кропа = (u.max() − u)·sx
+    px = (u.max() - u) * sx
+    py = (y1 - y0) - (v - v.min()) * sy
+    return px, py, sx, sy
+
+
+def raise_lamps(mesh, view, bands, dz_px, sigma_px=45.0, x_taper_px=25.0):
+    """Поднять полосу фар на dz_px пикселей кадра.
+
+    Смещение по +Z с весом: гаусс по вертикали (мягко гасит вверх и вниз) и
+    плавные «плечи» по краям полосы, плюс гашение там, где поверхность
+    отворачивается от камеры — поэтому крыло не рвётся на стыке с бампером.
+    """
+    px, py, sx, sy = _px_py(mesh, view)
+    n = mesh.vertex_normals
+    w = np.zeros(len(px))
+    for (x0, x1, y0, y1) in bands:
+        py0 = 0.5 * (y0 + y1)
+        g = np.exp(-((py - py0) / sigma_px) ** 2)
+        env = np.clip(np.minimum(px - x0, x1 - px) / x_taper_px, 0, 1)
+        env = env * env * (3 - 2 * env)
+        w = np.maximum(w, g * env)
+    w *= np.clip(n[:, 0] / 0.25, 0, 1)          # только передние поверхности
+    V = mesh.vertices.copy()
+    dz = dz_px / sy
+    V[:, 2] += dz * w
+    print(f'  подъём: вершин затронуто {int((w > 0.01).sum())}, '
+          f'макс. сдвиг {dz * w.max():.2f} юнита ({dz_px:.0f} px)')
+    out = trimesh.Trimesh(vertices=V, faces=mesh.faces, process=False)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--in', dest='src', default=ROOT + 'tayron_2023_optimized_v2.stl')
@@ -150,16 +193,25 @@ def main():
     ap.add_argument('--depth', type=float, default=4.0, help='глубина ниши, юниты')
     ap.add_argument('--taper', type=float, default=TAPER_PX,
                     help='ширина плавного края ниши, пиксели кадра')
+    ap.add_argument('--raise', dest='raise_px', type=float, default=0.0,
+                    help='на сколько поднять полосу фар, пиксели кадра')
+    ap.add_argument('--sigma', type=float, default=45.0, help='ширина подъёма по вертикали, px')
+    ap.add_argument('--dish-bottom', dest='dish_bottom', type=float, default=0.0,
+                    help='ниже этой строки нишу не резать (не задевать решётку)')
     ap.add_argument('--masks-only', action='store_true')
     a = ap.parse_args()
     print('маски по фото:')
-    masks = photo_masks('front')
+    masks = photo_masks('front', a.dish_bottom or None)
     masks_png(masks, ROOT + 'lamp_masks_front.png')
     if a.masks_only:
         return
     mesh = trimesh.load(a.src, force='mesh')
     print(f'вход: {a.src}: {len(mesh.faces)} граней, watertight={mesh.is_watertight}')
-    fixed = apply_depth(mesh, 'front', masks, a.depth, a.taper)
+    fixed = mesh
+    if a.raise_px:
+        bands = [(x0, x1, y0, y1) for _, (x0, x1, y0, y1), _ in ELEMENTS]
+        fixed = raise_lamps(fixed, 'front', bands, a.raise_px, a.sigma)
+    fixed = apply_depth(fixed, 'front', masks, a.depth, a.taper)
     fixed.export(a.dst)
     print(f'выход: {a.dst}: {len(fixed.faces)} граней, watertight={fixed.is_watertight}, '
           f'объём {fixed.volume:.1f}')
