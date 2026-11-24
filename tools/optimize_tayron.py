@@ -8,12 +8,13 @@
   2. селективное сглаживание Таубина (снимает скан-«крупку», сохраняет детали);
   3. крыша: гармоническое заполнение между рейлингами — панорамная панель и все
      её швы убираются, крыша становится сплошной, как у Tiguan;
-  4. акценты по фото (гравировка по нормалям, неизменная топология):
+  4. акценты по фото (рельеф смещением вершин, топология не меняется):
        • фары — чёткий контур, «линза» с углублением, проектор, хром-бровь;
-       • задние фонари — контур блока, углублённая «линза», шевроны-треугольники
-         (мотив X), тонкая полоса фонарей через всю корму;
-       • бампер Luxury Plus — контуры противотуманных блоков и серебристые
-         «X»-лучи по нижнему бамперу;
+       • задние фонари — утопленный блок с швом-контуром, красная линия через
+         корму, шеврон и красная полоса на крыле (координаты сняты с фото);
+       • бампер Luxury Plus — тёмная вставка с линиями по верху и низу,
+         серебристая накладка-«крыло» и полоса по низу; корпус ДХО берётся из
+         базовой модели (он уже вылеплен и совпадает с фото);
   5. децимация до бюджета граней Tiguan с защитой зон акцентов;
   6. скрытые «цапфы» в арках + булево объединение -> один водонепроницаемый корпус;
   7. экспорт STL в исходной системе координат.
@@ -303,10 +304,18 @@ def chevron(apex, base_top, base_bottom, depth=2.0, width=3.5):
     return polyline([base_top, apex, base_bottom], width=width, depth=depth)
 
 
-def apply_features(mesh, features, region, mirror=True, flip_normal=False):
-    """Смещение вершины по нормали; u=|Y| (или Y), v=Z."""
+def apply_features(mesh, features, region, mirror=True, flip_normal=False, normal=None):
+    """Смещение вершины по нормали; u=|Y| (или Y), v=Z.
+
+    normal задаёт единое направление смещения вместо по-вершинных нормалей:
+    для почти плоской панели (корма) это единственный способ получить ровный
+    рельеф — по-вершинные нормали на плотной сетке дают «рябь» из фасеток.
+    """
     v = mesh.vertices.astype(np.float64)
-    n = mesh.vertex_normals
+    if normal is None:
+        n = mesh.vertex_normals
+    else:
+        n = np.tile(np.asarray(normal, dtype=np.float64), (len(v), 1))
     u = np.abs(v[:, 1]) if mirror else v[:, 1]
     vv = v[:, 2]
     disp = np.zeros(len(v))
@@ -336,38 +345,50 @@ def front_features():
 
 
 def rear_features():
-    """Фонари Tayron по образцу Тигуана: узкая утопленная полоса через всю
-    корму с чётким уступом-контуром (по фото: Z 40–59, |Y| до 168) и
-    X-световоды «<» внутри неё — крупные, по два на сторону.
+    """Фонари Tayron 2023 — рисунок по фото, собранный из примитивов.
 
-    Глубина полосы 1.8 юнита (≈9 мм), стенка 1.2 юнита; шевроны 2.0 юнита
-    шириной 3 — на сетке 3–4 юнита это самые крупные штрихи, которые
-    держат форму и не рассыпаются в фасетки."""
-    band = [(12, 41.5), (60, 40.5), (110, 40), (150, 40.5), (165, 42.5),
-            (170, 48), (167, 55), (152, 58.5), (110, 59), (60, 59), (12, 58)]
+    Координаты сняты с фотографии кормы: u = (px − 1157.5)·0.3266,
+    v = (1164 − py)/3.102. Фотомаска красного рисунка тоньше шага сетки
+    (≈0.9 юнита) и давала «рябь», поэтому тот же рисунок перерисован по
+    измерениям: утопленный блок фонаря с тонким швом-контуром (как у Тигуана),
+    сквозная красная линия через корму, крупный шеврон и вертикальная
+    красная полоса на крыле. Штрихи взяты шириной 3.5–5 юнитов — только такие
+    сетка ещё держит без фасеток.
+    """
+    lamp = [(24, 42.0), (24, 55.0), (95, 57.5), (150, 58.5), (167, 55.0),
+            (170, 45.0), (166, 41.5)]
     feats = [
-        dish(band, depth=1.80, edge=1.0),          # полоса: контур-уступ
-        # световоды «<»: пара у шильда и пара у края
-        chevron((40, 49.5), (56, 57.0), (56, 42.0), depth=2.00, width=1.8),
-        chevron((76, 49.5), (92, 57.0), (92, 42.0), depth=2.00, width=1.8),
-        chevron((118, 49.5), (134, 57.0), (134, 42.0), depth=2.00, width=1.8),
-        chevron((148, 49.5), (160, 56.0), (160, 43.0), depth=2.00, width=1.7),
-        # светящаяся линия вдоль нижней кромки полосы
-        polyline([(12, 43.0), (60, 42.5), (110, 42.2), (158, 43.0)],
-                 width=1.2, depth=1.30),
+        dish(lamp, depth=0.90, edge=1.2),       # блок фонаря
+        outline(lamp, width=1.7, depth=1.30),   # тонкий шов-контур по краю
+        polyline([(20.0, 43.0), (166.0, 43.0)], width=4.0, depth=1.35),   # красная линия
+        polyline([(146.0, 44.5), (158.5, 51.0), (146.0, 57.5)],
+                 width=3.4, depth=1.20),        # крупный шеврон
+        capsule((165.0, 42.5), (165.0, 57.0), width=4.6, depth=1.35),     # красная полоса
     ]
     return feats
 
 
 def bumper_features():
-    """Бампер Luxury Plus: контуры ПТФ и серебристые X-лучи (глубина ≤0.8 юнита)."""
-    fog = [(133, -47), (160, -46), (170, -56), (166, -72), (140, -79), (129, -70)]
+    """Бампер Luxury Plus по фото (пиксели фото → u=|Y|, v=Z):
+    u = (1196 − px)·0.247, v = −46 − (py − 1120)·0.2435.
+
+    Корпус ДХО в базовой модели уже вылеплен (ободок + линза + диагональный
+    световод), и он почти совпадает с фото — поэтому здесь он НЕ перерисовывается:
+    второй контур поверх первого давал «двойную» мешанину и ромбы.
+    Добавляются только элементы, которых в базе нет: тёмная вставка-панель
+    с тонкими линиями по верху и низу, серебристая накладка-«крыло» под
+    нижней решёткой и серебристая полоса по низу бампера.
+    """
+    insert = [(18, -46), (150, -46), (166, -58), (166, -104), (150, -114),
+              (-150, -114), (-166, -104), (-166, -58), (-150, -46), (-18, -46)]
+    silver = [(22, -101), (105, -108), (140, -101), (150, -108), (110, -114), (22, -107)]
+    bottom = [(150, -116), (172, -116), (176, -124), (-176, -124), (-170, -116), (-150, -116)]
     feats = [
-        outline(fog, width=2.4, depth=2.00),
-        dish(fog, depth=0.55, edge=3.5),
-        # X-лучи: из-под номерного знака к ПТФ и к нижним углам бампера
-        capsule((42, -70), (144, -50), width=6.0, depth=-0.90),
-        capsule((42, -70), (146, -94), width=6.0, depth=-0.90),
+        dish(insert, depth=0.25, edge=1.5),      # чёрная вставка — едва утоплена
+        polyline([(-150, -46), (150, -46)], width=1.6, depth=0.70),   # верхняя линия
+        polyline([(-150, -114.5), (150, -114.5)], width=1.6, depth=0.70),  # нижняя линия
+        dish(silver, depth=-0.30, edge=1.2),     # серебристая накладка-«крыло»
+        dish(bottom, depth=-0.30, edge=1.2),     # серебристая полоса по низу
     ]
     return feats
 
@@ -386,7 +407,7 @@ def hidden_stub(wheel, reach=52.0, start=18.0, radius_frac=0.34, sections=48):
 
 
 def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces=340000,
-             detail_faces=330000,
+             detail_faces=330000, rear_refine=3,
              with_roof=True, with_details=True, verbose=True):
     t0 = time.time()
     scene = trimesh.load(src_path, force="mesh")
@@ -416,7 +437,7 @@ def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces
         # локальное уплотнение там, где нужны тонкие штрихи: фонари (×2) и фары (×1)
         c = body.triangles_center
         zr = (c[:, 0] < -392) & (np.abs(c[:, 1]) < 182) & (c[:, 2] > 34) & (c[:, 2] < 66)
-        body = refine_faces(body, np.where(zr)[0], levels=2)
+        body = refine_faces(body, np.where(zr)[0], levels=rear_refine)
         c = body.triangles_center
         zf = ((c[:, 0] > 372) & (np.abs(c[:, 1]) > 95) & (np.abs(c[:, 1]) < 186)
               & (c[:, 2] > -24) & (c[:, 2] < 14))
@@ -426,15 +447,27 @@ def optimize(src_path, dst_path, body_faces=62000, wheel_faces=6200, final_faces
         vb = body.vertices
         soft = (np.abs(vb[:, 1]) < 178) & (
             ((vb[:, 0] < -390) & (vb[:, 2] > 25) & (vb[:, 2] < 88)) |
-            ((vb[:, 0] > 370) & (vb[:, 2] > -92) & (vb[:, 2] < 38)))
+            ((vb[:, 0] > 360) & (vb[:, 2] > -104) & (vb[:, 2] < 38)))
         body = smooth_region(body, soft, iters=6, lam=0.45, mu=-0.48, feather=12)
         v = body.vertices
         n = body.vertex_normals
         front_region = (v[:, 0] > 370) & (n[:, 0] > 0.15)
         rear_region = (v[:, 0] < -370) & (n[:, 0] < -0.15)
         body, m1 = apply_features(body, front_features(), front_region, mirror=True)
-        body, m2 = apply_features(body, rear_features(), rear_region, mirror=True)
+        body, m2 = apply_features(body, rear_features(), rear_region, mirror=True,
+                                  normal=(-1.0, 0.0, 0.0))
         body, m3 = apply_features(body, bumper_features(), front_region, mirror=True)
+        # после гравировки гасим фасеточную «рябь» по самому рельефу: Таубин
+        # с малым весом снимает высокочастотные ступеньки, глубины остаются
+        vg = body.vertices
+        etched_front = ((np.abs(vg[:, 1]) < 178) & (vg[:, 0] > 356)
+                        & (vg[:, 2] > -104) & (vg[:, 2] < -34))
+        etched_rear = ((np.abs(vg[:, 1]) < 178) & (vg[:, 0] < -390)
+                       & (vg[:, 2] > 36) & (vg[:, 2] < 64))
+        # после гравировки гасим фасеточную «рябь»: Таубин снимает высокочастотные
+        # ступеньки сетки, а штрихи шириной 3.5–5 юнитов остаются
+        body = smooth_region(body, etched_front, iters=2, lam=0.32, mu=-0.34, feather=4)
+        body = smooth_region(body, etched_rear, iters=5, lam=0.45, mu=-0.47, feather=5)
         body = decimate_safe(body, detail_faces)
         if verbose:
             print(f"акценты: фары {int(m1.sum())}, фонари {int(m2.sum())}, бампер {int(m3.sum())} вершин")
@@ -476,10 +509,13 @@ def main():
     ap.add_argument("--wheel-faces", type=int, default=6200)
     ap.add_argument("--final-faces", type=int, default=340000)
     ap.add_argument("--detail-faces", type=int, default=330000)
+    ap.add_argument("--rear-refine", type=int, default=3,
+                    help="уровни уплотнения полосы задних фонарей (2–4)")
     ap.add_argument("--no-roof", action="store_true")
     ap.add_argument("--no-details", action="store_true")
     a = ap.parse_args()
     optimize(a.src, a.dst, a.body_faces, a.wheel_faces, a.final_faces, a.detail_faces,
+             rear_refine=a.rear_refine,
              with_roof=not a.no_roof, with_details=not a.no_details)
 
 
