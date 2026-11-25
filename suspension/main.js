@@ -481,7 +481,7 @@ function animate() {
     : stepPhys(Math.min(dt, 0.033), state.cur, state.k);
 
   // кузов
-  bodyGroup.position.z = -pose.zmm;   // 1 ед. = 1 мм
+  bodyGroup.position.z = -pose.zmm * U;   // мм печати → единицы модели
   bodyGroup.rotation.set(-pose.roll, pose.pit, 0);
 
   // колёса ходят вертикально относительно кузова, S-лента при этом гнётся
@@ -507,7 +507,7 @@ function animate() {
   const pitDeg  = Math.abs(pose.pit)*180/Math.PI;
   rollEl.innerHTML  = rollDeg.toFixed(1) + '<small>° ' + (rollDeg < 0.05 ? '' : (pose.roll > 0 ? 'влево' : 'вправо')) + '</small>';
   pitchEl.innerHTML = pitDeg.toFixed(1)  + '<small>° ' + (pitDeg  < 0.05 ? '' : (pose.pit  > 0 ? 'на нос' : 'на корму')) + '</small>';
-  sagEl.innerHTML   = Math.round(pose.zmm) + '<small>мм</small>';
+  sagEl.innerHTML   = pose.zmm.toFixed(1) + '<small>мм</small>';
   warnEl.style.display = pose.bottomed ? 'block' : 'none';
 
   CORNERS.forEach((c,i) => {
@@ -517,7 +517,7 @@ function animate() {
     f.style.width = pct + '%';
     if (mm >= 0) { f.style.left = '50%'; f.classList.remove('neg'); }
     else         { f.style.left = (50 - pct) + '%'; f.classList.add('neg'); }
-    bars[i].mm.textContent = (mm >= 0 ? '−' : '+') + Math.abs(Math.round(mm));
+    bars[i].mm.textContent = (mm >= 0 ? '+' : '−') + Math.abs(mm).toFixed(1);
     bars[i].mm.style.color = mm >= 0 ? '#8d9aac' : '#c9a06a';
 
     drawLabel(loadLabels[i], Math.round(state.cur[i]) + ' г', state.cur[i] > 3);
