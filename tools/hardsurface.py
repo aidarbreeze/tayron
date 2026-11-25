@@ -195,6 +195,86 @@ def fix_nonmanifold(mesh, rounds=4):
 
 def split_pinched(mesh):
     """Расщепить «зажимы»: там, где по одному ребру сходятся 4+ граней (две
+    поверхности касаются ребром), развести их, продублировав вершины ребра для
+    второй пары граней. Так две склеенные оболочки снова становятся двумя
+    замкнутыми.
+
+    Важно: правки копятся в одном массиве граней (newF), иначе второе ребро
+    затирает замены первого — на этом прошлый вариант и ломал кузов.
+    """
+    m = mesh.copy()
+    V = [v for v in m.vertices]
+    newF = m.faces.copy()
+    e = np.sort(m.edges, axis=1)
+    u, inv, cnt = np.unique(e, axis=0, return_inverse=True, return_counts=True)
+    eid = inv.reshape(-1, 3)
+    for b in np.where(cnt > 2)[0]:
+        faces = np.where((eid == b).any(1))[0]
+        a, c = int(u[b][0]), int(u[b][1])
+        pa, pc = m.vertices[a], m.vertices[c]
+        ax = pc - pa
+        ax = ax / (np.linalg.norm(ax) + 1e-12)
+        ref = np.cross(ax, [0.0, 0.0, 1.0])
+        if np.linalg.norm(ref) < 1e-6:
+            ref = np.cross(ax, [1.0, 0.0, 0.0])
+        ref /= np.linalg.norm(ref) + 1e-12
+        ref2 = np.cross(ax, ref)
+        ang = []
+        for f in faces:
+            third = [i for i in m.faces[f] if i not in (a, c)]
+            d = m.vertices[third[0]] - pa
+            d = d - ax * np.dot(d, ax)
+            ang.append(np.arctan2(float(np.dot(d, ref2)), float(np.dot(d, ref))))
+        order = faces[np.argsort(ang)]
+        for k in range(2, len(order), 2):
+            na, nc = len(V), len(V) + 1
+            V.append(pa.tolist())
+            V.append(pc.tolist())
+            for f in order[k:k + 2]:
+                newF[f] = [na if i == a else (nc if i == c else i) for i in newF[f]]
+    out = trimesh.Trimesh(vertices=np.array(V), faces=newF, process=False)
+    out = clean(out, merge=False)               # сварка снова склеила бы зажим
+    try:
+        trimesh.repair.fill_holes(out)
+    except Exception:                           # noqa: BLE001
+        pass
+    return clean(out, merge=False)              # без сварки: иначе зажим вернётся
+
+
+def fix_nonmanifold(mesh, rounds=4):
+    """Убрать «зажимы»: на ребре, где сходятся >2 граней, оставить две крупнейшие,
+    остальные удалить и заделать дырку. Так модель снова становится watertight."""
+    m = mesh
+    for _ in range(rounds):
+        e = np.sort(m.edges, axis=1)
+        u, inv, cnt = np.unique(e, axis=0, return_inverse=True, return_counts=True)
+        bad = np.where(cnt > 2)[0]
+        if not len(bad):
+            break
+        eid = inv.reshape(-1, 3)
+        area = m.area_faces
+        drop = set()
+        for b in bad:
+            faces = np.where((eid == b).any(1))[0]
+            if len(faces) <= 2:
+                continue
+            keep = faces[np.argsort(-area[faces])[:2]]
+            drop.update(int(f) for f in faces if f not in keep)
+        if not drop:
+            break
+        m = m.copy()
+        m.update_faces(~np.isin(np.arange(len(m.faces)), list(drop)))
+        m = clean(m)
+        try:
+            trimesh.repair.fill_holes(m)
+        except Exception:                       # noqa: BLE001
+            pass
+        m = clean(m)
+    return m
+
+
+def split_pinched(mesh):
+    """Расщепить «зажимы»: там, где по одному ребру сходятся 4+ граней (две
     поверхности касаются ребром), развести их, продублировав вершины ребра.
     Так две склеенные оболочки снова становятся двумя замкнутыми."""
     m = mesh.copy()
@@ -277,6 +357,39 @@ def facet(mesh, target=12000, ang=12.0, dist=0.6, rounds=2, verbose=True, max_mo
     return m
 
 
+def solidify(meshes, pitch=3.0, verbose=True):
+    """Сварить всё в один солид через воксели: заливка + marching cubes.
+
+    Надёжнее булевых операций: заливка не боится зажимов, мелких дырок и
+    касаний — на выходе всегда одна замкнутая оболочка (если тела реально
+    соединены в пространстве).
+    """
+    from trimesh.voxel.ops import matrix_to_marching_cubes  # noqa: F401
+    allm = trimesh.util.concatenate(list(meshes))
+    vg = allm.voxelized(pitch=pitch)
+    grid = vg.fill()
+    out = grid.marching_cubes
+    # marching cubes отдаёт индексы вокселей — вернуть в координаты модели
+    out.apply_transform(grid.transform)          # индексы вокселей → координаты модели
+    out = clean(out)
+    if verbose:
+        print(f'  воксели: pitch {pitch}, сетка {tuple(int(v) for v in grid.shape)}, '
+              f'граней {len(out.faces)}, watertight {"да" if out.is_watertight else "НЕТ"}, '
+              f'компонент {len(out.split(only_watertight=False))}')
+    return out
+
+
+def shrink_wrap(mesh, target):
+    """Протянуть поверхность к исходной модели: вершины — к ближайшей точке.
+
+    Воксельная сварка даёт «лестницу» с шагом вокселя; проекция возвращает
+    вершины на настоящую поверхность, топология (и watertight) не меняются.
+    """
+    q = trimesh.proximity.ProximityQuery(target)
+    pts, dist, _ = q.on_surface(mesh.vertices)
+    return trimesh.Trimesh(vertices=pts, faces=mesh.faces, process=False), dist
+
+
 def _axis_of(part, centre):
     """Ось колеса: направление наименьшего размаха, знаком — к центру кузова."""
     e, v = np.linalg.eigh(np.cov(part.vertices.T))
@@ -287,14 +400,47 @@ def _axis_of(part, centre):
     return ax / np.linalg.norm(ax), float(np.ptp(np.abs(part.vertices @ ax)))
 
 
-def split_parts(mesh, min_faces=20):
-    """Отдельные оболочки: кузов (самая крупная) и остальное (колёса, мелочь)."""
+def split_parts(mesh, min_faces=20, min_area_frac=1e-4):
+    """Отдельные оболочки: кузов (самая крупная) и остальное (колёса, мелочь).
+
+    Мелочь отбрасывается сразу: в моделях из редактора рядом с телом висят
+    десятки «пылинок» по 2–6 граней с нулевой площадью.
+    """
     shells = [c for c in mesh.split(only_watertight=False) if len(c.faces) >= min_faces]
+    if not shells:
+        return mesh, []
+    top = max(float(c.area) for c in shells)
+    shells = [c for c in shells if float(c.area) >= top * min_area_frac]
     body = max(shells, key=lambda c: float(c.area))
     return body, [c for c in shells if c is not body]
 
 
-def join(mesh, bridge=True, verbose=True):
+def repair(part, verbose=False):
+    """Довести оболочку до watertight: расщепить зажимы, заделать дырки, сварить."""
+    m = part
+    if m.is_watertight:
+        return clean(m)
+    m = clean(m)
+    m = split_pinched(m)
+    try:
+        trimesh.repair.fill_holes(m)
+    except Exception:                           # noqa: BLE001
+        pass
+    m = clean(m)
+    if not m.is_watertight:
+        m2 = split_pinched(m)
+        try:
+            trimesh.repair.fill_holes(m2)
+        except Exception:                       # noqa: BLE001
+            pass
+        m = clean(m2)
+    if verbose:
+        print(f'  ремонт: граней {len(m.faces)}, watertight '
+              f'{"да" if m.is_watertight else "НЕТ"}')
+    return m
+
+
+def join(mesh, bridge=True, verbose=True, voxel_pitch=2.5):
     """Соединить колёса с кузовом в один солид.
 
     Колёса в таких моделях — отдельные замкнутые оболочки, стоящие в арке с
@@ -304,10 +450,8 @@ def join(mesh, bridge=True, verbose=True):
     объединения всё становится одним watertight-телом.
     """
     body, rest = split_parts(mesh)
-    body = clean(body)
-    if not body.is_watertight:
-        trimesh.repair.fill_holes(body)
-        body = clean(body)
+    body = repair(body, verbose)
+    rest = [repair(c) for c in rest]
     vol_body = abs(float(body.volume)) if body.is_watertight else float(np.prod(body.extents))
     vol_body = vol_body or 1.0
     centre = body.bounds.mean(0)
@@ -341,13 +485,28 @@ def join(mesh, bridge=True, verbose=True):
             print(f'  колесо: Ø {2 * r:.1f}, ось {np.round(ax, 2).tolist()}, '
                   f'до кузова {reach:.1f} → ступица {h:.1f}')
     solids = [body] + wheels + bridges
-    try:
-        out = trimesh.boolean.union(solids, engine='manifold')
-    except Exception as e:                      # noqa: BLE001
+    out = None
+    if all(x.is_watertight for x in solids):
+        try:
+            out = trimesh.boolean.union(solids, engine='manifold')
+        except Exception as e:                  # noqa: BLE001
+            if verbose:
+                print(f'  булево объединение не прошло ({e}) — свариваю вокселями')
+    voxel = out is None
+    if voxel:
+        out = solidify(solids, pitch=voxel_pitch, verbose=verbose)
+        out, dist = shrink_wrap(out, trimesh.util.concatenate(solids))
         if verbose:
-            print(f'  объединение не прошло ({e}); склеиваю как есть')
-        out = trimesh.util.concatenate(solids)
-    out = clean(out)
+            print(f'  протяжка к исходной поверхности: медиана {float(np.median(dist)):.2f}, '
+                  f'95 % {float(np.percentile(dist, 95)):.2f} юнита; '
+                  f'watertight {"да" if out.is_watertight else "НЕТ"}')
+    if voxel:
+        # после вокселей ни сварка, ни выкидывание «вырожденных» граней нельзя:
+        # вырожденные появляются при протяжке, но их удаление рвёт оболочку
+        out = out.copy()
+        trimesh.repair.fix_normals(out)
+    else:
+        out = clean(out)
     if verbose:
         print(f'  соединение: тел {len(solids)} → граней {len(out.faces)}, '
               f'компонент {len(out.split(only_watertight=False))}, '
@@ -369,6 +528,8 @@ def main():
     ap.add_argument('--join', dest='join', action='store_true', default=True,
                     help='соединить колёса с кузовом (по умолчанию да)')
     ap.add_argument('--no-join', dest='join', action='store_false')
+    ap.add_argument('--voxel-pitch', dest='pitch', type=float, default=3.0,
+                    help='шаг вокселей при сварке в один солид, юниты')
     a = ap.parse_args()
     src = trimesh.load(a.src, force='mesh' if not a.src.lower().endswith('.3mf') else None)
     print(f'вход: {a.src}')
@@ -378,7 +539,7 @@ def main():
                 if isinstance(src, trimesh.Scene) else src)
         if a.join:
             print('соединение колёс с кузовом:')
-            flat = join(flat)
+            flat = join(flat, voxel_pitch=a.pitch)
         out = facet(flat, a.faces, a.angle, a.dist, a.rounds)
         out.export(a.dst)
         print(f'выход: {a.dst}: граней {len(out.faces)}, watertight {out.is_watertight}, '
