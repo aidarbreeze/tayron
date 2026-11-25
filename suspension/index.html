@@ -125,16 +125,16 @@
   <div id="sliders"></div>
 
   <h2>Настройки</h2>
-  <p class="hint">У напечатанной модели (≈80 г) жёсткость на колесе 0.2 Н/мм — просадка ≈1 мм при ходе 2 мм; ползунок «Масса» демонстрационный.</p>
+  <p class="hint">Пружин нет: упругость даёт S-образный переходник (лента 6×0.9 мм). У напечатанной модели ≈100 г жёсткость 0.63 Н/мм на колесо — просадка 0.39 мм при ходе 1.4 мм.</p>
   <div class="row">
-    <span class="tag" style="width:auto">Пружина</span>
-    <input type="range" id="k" min="0.3" max="2" step="0.1" value="0.7">
-    <span class="val" id="kv">0.7 Н/мм</span>
+    <span class="tag" style="width:auto">Жёсткость</span>
+    <input type="range" id="k" min="0.2" max="1.5" step="0.01" value="0.63">
+    <span class="val" id="kv">0.63 Н/мм</span>
   </div>
   <div class="row">
     <span class="tag" style="width:auto">Масса</span>
-    <input type="range" id="mass" min="0.5" max="3" step="0.1" value="1.5">
-    <span class="val" id="mv">1.5 кг</span>
+    <input type="range" id="mass" min="0.04" max="0.4" step="0.01" value="0.10">
+    <span class="val" id="mv">0.10 кг</span>
   </div>
   <div class="row">
     <span class="tag" style="width:auto">Демпфер</span>
@@ -165,9 +165,9 @@
   <h2 style="margin-top:14px">Ход подвески по колёсам</h2>
   <div class="bars" id="bars"></div>
   <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:7px">
-    <span>сжатие ←</span><span>ход 12 мм</span><span>→ отбой</span>
+    <span>сжатие ←</span><span>ход 1.4 мм</span><span>→ отбой</span>
   </div>
-  <div id="warn">Пробой подвески: колесо упёрлось в арку. Дальше кузов не проседает.</div>
+  <div id="warn">Пробой: S-лента легла на отбойник в канале кузова. Дальше кузов не проседает.</div>
 </div>
 
 <div class="panel" id="hint">
@@ -179,14 +179,17 @@
 <details class="panel" id="about">
   <summary>Как это устроено</summary>
   <div class="txt">
-    Прямой рычаг (одна деталь на все 4 колеса) + печатная витая пружина Ø3.5/Ø13 + балка 217 с втулкой 224.
+    Пружин и шарниров нет. Колесо держится на S-образном упругом переходнике
+    (вид сверху — буква S), амортизация — изгиб его тонкой ленты.
     <dl style="margin-top:8px">
-      <dt>Ось качания</dt><dd>втулка Ø17.6 в кармане кузова</dd>
-      <dt>Рычаг</dt><dd>прямой, 10×14 мм, плечо 84 мм, палец Ø7 в пазу кузова</dd>
-      <dt>Пружина</dt><dd>PLA, провод Ø3.5, средний Ø13, 5.5 витка → 1.7 Н/мм (0.7 Н/мм на колесе)</dd>\n      <dt>Ход</dt><dd>11.5 ед. = 62 мм до упора в арку</dd>
+      <dt>Переходник</dt><dd>лента 6 × 0.9 мм, длина по кривой 18.3 мм, 3EI/L³ = 0.63 Н/мм</dd>
+      <dt>Крепление к кузову</dt><dd>корневая колодка 5×2.5×3 мм в канале кузова (на клей)</dd>
+      <dt>Защёлка колеса</dt><dd>кольцо Ø13.4 с тремя прорезями (цанга) входит в родное углубление ступицы, буртик ложится на плоскость диска</dd>
+      <dt>Диск</dt><dd>не сверлится и не режется: лицевая сторона не тронута</dd>
+      <dt>Ход</dt><dd>1.4 мм до отбойника (напряжение в ленте 20 МПа при пределе PLA ≈ 45)</dd>
       <dt>Колея</dt><dd>1655 мм</dd>
       <dt>База</dt><dd>2789 мм</dd>
-      <dt>1 ед. модели</dt><dd>5.33 мм</dd>
+      <dt>1 ед. модели</dt><dd>0.17 мм печати</dd>
     </dl>
   </div>
 </details>

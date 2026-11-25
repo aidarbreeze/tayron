@@ -7,18 +7,17 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
    балка 217 с втулкой 224, колесо насажено на втулку. Масштаб ×1.62
    ============================================================ */
 
-const U        = 5.3327;   // мм на 1 единицу модели (база 2789 мм / 523 ед.)
-const ARM      = 84.9;     // рычаг: шарнир → центр колеса по горизонтали, ед.
-const TRAVEL   = 12.0;     // ход до арки, ед. (12 мм на печати — шина касается арки)
-const MAXLOAD  = 2000;     // г на угол (напечатанная модель весит ~1.5 кг)
+const U        = 5.8824;   // ед. модели на 1 мм печати (печать 17 %)
+const TRAVEL   = 1.4;      // ход до отбойника, мм печати
+const MAXLOAD  = 200;      // г на угол: при ~90 г угол садится на отбойник
 const G        = 9.81;
 
 // геометрия механизма: файл модели → ось качания Q и центр колеса wc
 const RIG = {
-  0: { Q: [-261.59, 70.00, 100.00], wc: [-261.59, 154.91, 71.45], arm: 84.91, seatTop: [-261.59, 118.00, 166.96], L0: 76.76, ratio: 0.565 },
-  1: { Q: [261.41, 70.00, 100.00], wc: [261.41, 154.91, 71.40], arm: 84.91, seatTop: [261.41, 118.00, 166.94], L0: 76.76, ratio: 0.565 },
-  2: { Q: [261.45, -70.00, 100.00], wc: [261.45, -155.55, 71.45], arm: 85.55, seatTop: [261.45, -118.00, 167.08], L0: 76.76, ratio: 0.561 },
-  3: { Q: [-261.47, -70.00, 100.00], wc: [-261.47, -155.49, 71.46], arm: 85.49, seatTop: [-261.47, -118.00, 167.07], L0: 76.76, ratio: 0.561 }
+  0: { wc: [-261.59, 154.91, 71.45], hub: 149.32, root: [-261.59, 64.05, 71.45] },
+  1: { wc: [261.41, 154.91, 71.40], hub: 149.32, root: [261.41, 64.05, 71.40] },
+  2: { wc: [261.45, -155.55, 71.45], hub: -150.60, root: [261.45, -65.33, 71.45] },
+  3: { wc: [-261.47, -155.49, 71.46], hub: -150.64, root: [-261.47, -65.37, 71.46] }
 };
 
 const CORNERS = [
@@ -27,6 +26,7 @@ const CORNERS = [
   { id:'RL', name:'Заднее левое',    short:'ЗЛ', file:0, x:-261.6, y: 154.9 },
   { id:'RR', name:'Заднее правое',   short:'ЗП', file:3, x:-261.5, y:-155.5 }
 ];
+CORNERS.forEach(c => { c.dx = c.x / U; c.dy = c.y / U; });   // плечи в мм печати
 
 /* ============================================================
    Физика: жёсткий кузов на 4 пружинах, с гравитацией и демпфером.
@@ -34,13 +34,15 @@ const CORNERS = [
    масса в кг. Поэтому 1 Н/мм = 1000 кг/с², g = 9810 мм/с².
    Кузов имеет 3 степени свободы: просадка z (вниз +), крен, тангаж.
    ============================================================ */
-let   MASS   = 1.5;            // кг, кузов с колёсами
+let   MASS   = 0.10;           // кг, напечатанная модель (~100 г при 20 %)
 const G_MM   = 9810;           // мм/с²
 let   ZETA   = 0.22;           // демпфирование (доля критического)
 const HARD   = 60;             // жёсткость отбойника, ×k
-let   IROLL  = MASS * 155 * 155;   // кг·мм² (половина колеи)
-let   IPITCH = MASS * 209 * 209;   // кг·мм²
-function setMass(m) { MASS = m; IROLL = m*155*155; IPITCH = m*209*209; }
+const HALF_TRACK = 154.9 / U;   // половина колеи, мм печати (~26 мм)
+const HALF_BASE  = 261.5 / U;   // половина базы, мм печати (~44 мм)
+let   IROLL  = MASS * HALF_TRACK * HALF_TRACK;   // кг·мм²
+let   IPITCH = MASS * HALF_BASE  * HALF_BASE;    // кг·мм²
+function setMass(m) { MASS = m; IROLL = m*HALF_TRACK*HALF_TRACK; IPITCH = m*HALF_BASE*HALF_BASE; }
 
 const phys = { z:0, vz:0, roll:0, vroll:0, pit:0, vpit:0 };
 let physTime = 0;
@@ -51,20 +53,21 @@ function stepPhys(dt, loads, k) {
   const s0 = MASS * G_MM / (4 * kk);                 // статическое сжатие, мм
   const sub = 12, h = dt / sub;
   for (let n = 0; n < sub; n++) {
-    let Fz = 0, Ty = 0, Tx = 0, Lsum = 0;
+    let Fz = 0, Ty = 0, Tx = 0, Lsum = 0, bot = false;
     const comp = [0,0,0,0];
     CORNERS.forEach((c, i) => {
-      const zc = phys.z + phys.roll*c.y + phys.pit*c.x;      // + вниз
-      const vc = phys.vz + phys.vroll*c.y + phys.vpit*c.x;
+      const zc = phys.z + phys.roll*c.dy + phys.pit*c.dx;    // + вниз
+      const vc = phys.vz + phys.vroll*c.dy + phys.vpit*c.dx;
       let sg = s0 + zc;                                       // сжатие, мм
       let F = 0;
       if (sg > 0) F = kk*sg + cc*vc;                          // пружина + демпфер
       if (sg > TRAVEL) F += HARD*kk*(sg - TRAVEL);            // отбойник
       const L = loads[i]/1000 * G_MM;                         // вес нагрузки, кг·мм/с²
       comp[i] = Math.min(TRAVEL, Math.max(0, sg)) - s0;
+      if (sg >= TRAVEL - 0.02) bot = true;
       Fz += F; Lsum += L;
-      Tx += (L - F) * c.y;                                    // момент крена
-      Ty += (L - F) * c.x;                                    // момент тангажа
+      Tx += (L - F) * c.dy;                                   // момент крена
+      Ty += (L - F) * c.dx;                                   // момент тангажа
     });
     phys.vz    += (G_MM + (Lsum - Fz)/MASS) * h;
     phys.vroll += (Tx / IROLL) * h;
@@ -75,7 +78,7 @@ function stepPhys(dt, loads, k) {
     phys.z     = Math.max(-40, Math.min(TRAVEL + 6, phys.z));
     phys.roll  = Math.max(-0.2, Math.min(0.2, phys.roll));
     phys.pit   = Math.max(-0.2, Math.min(0.2, phys.pit));
-    phys._comp = comp;
+    phys._comp = comp; phys._bot = bot;
   }
   physTime += dt;
   const comp = phys._comp || [0,0,0,0];
@@ -83,7 +86,7 @@ function stepPhys(dt, loads, k) {
     zmm: phys.z,                       // мм (= ед. модели), + вниз
     roll: phys.roll, pit: phys.pit,
     disp: comp,                        // сжатие каждого угла относительно статики
-    bottomed: comp.some(v => v >= TRAVEL - 0.05)
+    bottomed: !!phys._bot
   };
 }
 
@@ -168,7 +171,7 @@ const MAT = {
   wheel:  new THREE.MeshStandardMaterial({ color:0x2a2e34, metalness:0.03, roughness:0.88 }),
   sleeve: new THREE.MeshStandardMaterial({ color:0xf0a13c, metalness:0.05, roughness:0.55, emissive:0x1d0f00, emissiveIntensity:0.35 }),
   beam:   new THREE.MeshStandardMaterial({ color:0x36c9ad, metalness:0.05, roughness:0.55, emissive:0x06302a, emissiveIntensity:0.5 }),
-  spring: new THREE.MeshStandardMaterial({ color:0xd6dee8, metalness:0.05, roughness:0.62 })
+  link:   new THREE.MeshStandardMaterial({ color:0xf0a13c, metalness:0.05, roughness:0.5, emissive:0x241000, emissiveIntensity:0.4 })
 };
 
 const arms = [];        // { group, wheelPivot, corner }
@@ -197,55 +200,55 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
   const [bodyScene, ...rest] = await Promise.all([
     load('./assets/body.glb'),
     ...CORNERS.flatMap(c => [
-      load(`./assets/c${c.file}_sleeve.glb`),
-      load(`./assets/c${c.file}_beam.glb`),
-      load(`./assets/c${c.file}_wheel.glb`),
-      load(`./assets/c${c.file}_spring.glb`)
+      load(`./assets/c${c.file}_link.glb`),
+      load(`./assets/c${c.file}_wheel.glb`)
     ])
   ]);
 
-  // кузов
   bodyScene.traverse(o => { if (o.isMesh) { o.material = MAT.body; o.castShadow = true; o.receiveShadow = true; } });
   bodyGroup.add(bodyScene);
 
   CORNERS.forEach((c, i) => {
-    const [sleeveScene, beamScene, wheelScene, springScene] = rest.slice(i*4, i*4+4);
+    const [linkScene, wheelScene] = rest.slice(i*2, i*2+2);
     const rig = RIG[c.file];
 
-    // рычаг: группа в оси качания, качается вокруг X
-    const arm = new THREE.Group();
-    arm.position.fromArray(rig.Q);
-    beamScene.traverse(o => { if (o.isMesh) { o.material = MAT.beam; o.castShadow = true; } });
-    arm.add(beamScene);
+    // S-переходник: закреплён в кузове, гнётся при ходе колеса
+    linkScene.traverse(o => { if (o.isMesh) { o.material = MAT.link; o.castShadow = true; } });
+    const linkGroup = new THREE.Group();
+    linkGroup.add(linkScene);
+    bodyGroup.add(linkGroup);
 
-    // ось (балка 217 + втулка 224) жёстко в рычаге
-    const axle = new THREE.Group();
-    sleeveScene.traverse(o => { if (o.isMesh) { o.material = MAT.sleeve; o.castShadow = true; } });
-    axle.add(sleeveScene);
-    arm.add(axle);
-
-    // колесо — в pivot, который компенсирует качание (колесо остаётся вертикальным)
-    const wpOffset = new THREE.Vector3().fromArray(rig.wc).sub(new THREE.Vector3().fromArray(rig.Q));
-    const wheelPivot = new THREE.Group();
-    wheelPivot.position.copy(wpOffset);
+    // колесо: своя группа, ходит вертикально относительно кузова
+    const wheelGroup = new THREE.Group();
     wheelScene.traverse(o => { if (o.isMesh) { o.material = MAT.wheel; o.castShadow = true; } });
-    wheelScene.position.copy(wpOffset).multiplyScalar(-1);
-    wheelPivot.add(wheelScene);
-    arm.add(wheelPivot);
+    wheelScene.position.fromArray(rig.wc).multiplyScalar(-1);   // меш экспортирован в абсолютных координатах
+    wheelGroup.add(wheelScene);
+    bodyGroup.add(wheelGroup);
 
-    bodyGroup.add(arm);
+    // профиль изгиба ленты: f — доля пути от корня к ступице
+    const root = new THREE.Vector3().fromArray(rig.root);
+    const tip  = new THREE.Vector3().fromArray(rig.wc);
+    const dir  = tip.clone().sub(root); const L = dir.length(); dir.normalize();
+    const meshes = [];
+    linkScene.traverse(o => {
+      if (!o.isMesh) return;
+      const g = o.geometry;
+      const orig = g.attributes.position.array.slice();
+      const n = g.attributes.position.count;
+      const f = new Float32Array(n);
+      const v = new THREE.Vector3();
+      for (let k = 0; k < n; k++) {
+        v.fromArray(orig, k*3).sub(root);
+        const t = THREE.MathUtils.clamp(v.dot(dir) / L, 0, 1);
+        f[k] = (3*t*t - t*t*t) / 2;          // прогиб консоли под концевой силой
+      }
+      g.userData = { orig, f };
+      meshes.push(g);
+    });
 
-    // пружина: верх закреплён в кузове, низ лежит на площадке рычага → сжимается
-    springScene.traverse(o => { if (o.isMesh) { o.material = MAT.spring; o.castShadow = true; } });
-    const spring = new THREE.Group();
-    spring.position.fromArray(rig.seatTop);
-    spring.add(springScene);
-    bodyGroup.add(spring);
-
-    const e1 = new THREE.Vector3().fromArray(rig.wc).sub(new THREE.Vector3().fromArray(rig.Q)).normalize();
-    arms.push({ arm, axle, wheelPivot, spring, rig, corner:c, sign: Math.sign(c.y),
-                baseArm: rig.Q.slice(), baseWheel: wpOffset.toArray(), baseSpring: rig.seatTop.slice(),
-                e1, signY: Math.sign(c.y) });
+    // базовая позиция колеса — в абсолютных координатах модели
+    wheelGroup.position.fromArray(rig.wc);
+    arms.push({ linkGroup, meshes, wheelGroup, rig, corner: c, signY: Math.sign(c.y) });
   });
 
   document.getElementById('loading').style.opacity = 0;
@@ -266,7 +269,7 @@ const stg = (v, a, b) => smooth((v - a) / (b - a));
 const state = {
   loads: [0,0,0,0],     // целевые, г
   cur:   [0,0,0,0],     // сглаженные
-  k: 0.7,
+  k: 0.63,
   demo: false,
   xray: false
 };
@@ -277,7 +280,7 @@ const sliders = CORNERS.map((c, i) => {
   const row = document.createElement('div');
   row.className = 'row';
   row.innerHTML = `<span class="tag">${c.short}</span>
-    <input type="range" min="0" max="${MAXLOAD}" step="25" value="0" id="s-${c.id}">
+    <input type="range" min="0" max="${MAXLOAD}" step="10" value="0" id="s-${c.id}">
     <span class="val" id="v-${c.id}">0 г</span>`;
   slidersEl.appendChild(row);
   const inp = row.querySelector('input');
@@ -307,11 +310,11 @@ function stopDemo() {
 /* ---------- сценарии ---------- */
 const PRESETS = {          // граммы на угол
   zero:  [0,0,0,0],
-  fl:    [500,0,0,0],
-  roof:  [375,375,375,375],   // 1.5 кг на крышу
-  trunk: [0,0,400,400],       // 0.8 кг в багажник
-  side:  [0,0,800,800],       // 1.6 кг на левый борт
-  diag:  [750,0,0,750]        // 1.5 кг по диагонали
+  fl:    [60,0,0,0],          // 60 г на переднее левое
+  roof:  [80,80,80,80],       // 320 г на крышу (на грани пробоя)
+  trunk: [0,0,50,50],         // 100 г в багажник
+  side:  [60,0,60,0],         // 120 г на левый борт
+  diag:  [60,0,0,60]          // по диагонали
 };
 document.querySelectorAll('[data-preset]').forEach(b => {
   b.addEventListener('click', () => {
@@ -456,7 +459,7 @@ function animate() {
   // демо-режим: перекачка нагрузки влево-вправо
   if (state.demo) {
     const s = Math.sin(t0*1.1);
-    const Lv = Math.max(0, s)*800, Rv = Math.max(0, -s)*800;
+    const Lv = Math.max(0, s)*70, Rv = Math.max(0, -s)*70;
     setLoads([Lv, Rv, Lv*0.8, Rv*0.8]);
   }
 
@@ -468,16 +471,10 @@ function animate() {
   exp.v += (exp.target - exp.v) * Math.min(1, dt*5.5);
   const exv = exp.v;
   arms.forEach(a => {
-    const sw = stg(exv, 0.00, 0.35);   // колесо
-    const sa = stg(exv, 0.20, 0.55);   // балка + втулка
-    const sA = stg(exv, 0.40, 0.75);   // рычаг
-    const sS = stg(exv, 0.60, 0.95);   // пружина
-    a.wheelPivot.position.set(a.baseWheel[0], a.baseWheel[1] + a.signY*320*sw, a.baseWheel[2] + 40*sw);
-    a.axle.position.set(0, a.signY*170*sa, 0);
-    a.arm.position.set(a.baseArm[0] + a.e1.x*160*sA,
-                       a.baseArm[1] + a.e1.y*160*sA,
-                       a.baseArm[2] + a.e1.z*160*sA);
-    a.spring.position.set(a.baseSpring[0], a.baseSpring[1], a.baseSpring[2] + 210*sS);
+    const sw = stg(exv, 0.00, 0.40);   // колесо
+    const sL = stg(exv, 0.30, 0.75);   // S-переходник
+    a.wheelGroup.position.set(a.rig.wc[0], a.rig.wc[1] + a.signY*330*sw, a.rig.wc[2] + 30*sw);
+    a.linkGroup.position.set(0, a.signY*150*sL, 40*sL);
   });
   const pose = (exv > 0.03)
     ? { zmm:0, roll:0, pit:0, disp:[0,0,0,0], bottomed:false }
@@ -487,16 +484,22 @@ function animate() {
   bodyGroup.position.z = -pose.zmm;   // 1 ед. = 1 мм
   bodyGroup.rotation.set(-pose.roll, pose.pit, 0);
 
-  // рычаги и колёса
+  // колёса ходят вертикально относительно кузова, S-лента при этом гнётся
   arms.forEach((a, i) => {
-    const d = pose.disp[i];                        // ед., + вниз
-    const alpha = a.sign * Math.asin(THREE.MathUtils.clamp(d / (RIG[a.corner.file].arm || ARM), -0.999, 0.999));
-    a.arm.rotation.x = alpha;
-    a.wheelPivot.rotation.x = -alpha;              // колесо остаётся вертикальным
-    if (a.spring) {                                // пружина сжимается/разжимается
-      const dy = d * (a.rig.ratio || 0.6);
-      a.spring.scale.z = Math.max(0.35, (a.rig.L0 - dy) / a.rig.L0);
-    }
+    const d = pose.disp[i] * U;                    // ед. модели, + вниз (сжатие)
+    const ex = stg(exv, 0.00, 0.40), exL = stg(exv, 0.30, 0.75);
+    a.wheelGroup.position.set(a.rig.wc[0],
+                              a.rig.wc[1] + a.signY*330*ex,
+                              a.rig.wc[2] + 30*ex + d);
+    a.linkGroup.position.set(0, a.signY*150*exL, 40*exL);
+    a.meshes.forEach(g => {
+      const { orig, f } = g.userData;
+      const arr = g.attributes.position.array;
+      for (let k = 0; k < f.length; k++) arr[k*3+2] = orig[k*3+2] + d * f[k];
+      g.attributes.position.needsUpdate = true;
+      g.computeVertexNormals();
+      g.computeBoundingSphere();
+    });
   });
 
   // телеметрия
