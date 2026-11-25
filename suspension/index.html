@@ -121,14 +121,14 @@
     <button class="btn wide" data-preset="demo">▶ Качание (демо)</button>
   </div>
 
-  <h2>Нагрузка на угол, кг</h2>
+  <h2>Нагрузка на угол, г</h2>
   <div id="sliders"></div>
 
   <h2>Настройки</h2>
   <div class="row">
     <span class="tag" style="width:auto">Пружина</span>
-    <input type="range" id="k" min="15" max="45" step="1" value="30">
-    <span class="val" id="kv">30 Н/мм</span>
+    <input type="range" id="k" min="0.3" max="2" step="0.1" value="0.7">
+    <span class="val" id="kv">0.7 Н/мм</span>
   </div>
   <div class="presets" style="margin-top:10px">
     <button class="btn" id="xray">Рентген кузова</button>
@@ -158,11 +158,11 @@
 <details class="panel" id="about">
   <summary>Как это устроено</summary>
   <div class="txt">
-    Механизм собран из ваших деталей (217/219/220/221/224), масштаб ×1.62 под арки Tayron.
+    Прямой рычаг (одна деталь на все 4 колеса) + печатная витая пружина Ø3.5/Ø13 + балка 217 с втулкой 224.
     <dl style="margin-top:8px">
       <dt>Ось качания</dt><dd>втулка Ø17.6 в кармане кузова</dd>
-      <dt>Рычаг</dt><dd>пружинная накладка 220+221 в кронштейне 219, плечо 111–114 ед.</dd>
-      <dt>Ход</dt><dd>11.5 ед. = 62 мм до упора в арку</dd>
+      <dt>Рычаг</dt><dd>прямой, 10×14 мм, плечо 84 мм, палец Ø7 в пазу кузова</dd>
+      <dt>Пружина</dt><dd>PLA, провод Ø3.5, средний Ø13, 5.5 витка → 1.7 Н/мм (0.7 Н/мм на колесе)</dd>\n      <dt>Ход</dt><dd>11.5 ед. = 62 мм до упора в арку</dd>
       <dt>Колея</dt><dd>1655 мм</dd>
       <dt>База</dt><dd>2789 мм</dd>
       <dt>1 ед. модели</dt><dd>5.33 мм</dd>

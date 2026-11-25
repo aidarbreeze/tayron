@@ -8,17 +8,17 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
    ============================================================ */
 
 const U        = 5.3327;   // мм на 1 единицу модели (база 2789 мм / 523 ед.)
-const ARM      = 114;      // рычаг: шарнир в арке → центр колеса, ед.
-const TRAVEL   = 11.5;     // ход вверх до арки, ед. (62 мм — упор в арку)
-const MAXLOAD  = 200;      // кг на угол
+const ARM      = 84.9;     // рычаг: шарнир → центр колеса по горизонтали, ед.
+const TRAVEL   = 12.0;     // ход вверх до арки, ед. (64 мм — шина касается арки)
+const MAXLOAD  = 2000;     // г на угол (напечатанная модель весит ~1.5 кг)
 const G        = 9.81;
 
 // геометрия механизма: файл модели → ось качания Q и центр колеса wc
 const RIG = {
-  0: { Q: [-270.21, 60.51, 134.92], wc: [-261.59, 154.91, 71.45], arm: 114.1 },
-  1: { Q: [252.79, 60.50, 134.87], wc: [261.41, 154.91, 71.40], arm: 114.1 },
-  2: { Q: [252.83, -102.98, 169.16], wc: [261.45, -155.55, 71.45], arm: 111.3 },
-  3: { Q: [-270.09, -103.02, 169.17], wc: [-261.47, -155.49, 71.46], arm: 111.2 }
+  0: { Q: [-261.59, 70.00, 100.00], wc: [-261.59, 154.91, 71.45], arm: 84.91, seatTop: [-261.59, 118.00, 140.74], L0: 47.50, ratio: 0.565 },
+  1: { Q: [261.41, 70.00, 100.00], wc: [261.41, 154.91, 71.40], arm: 84.91, seatTop: [261.41, 118.00, 140.72], L0: 47.50, ratio: 0.565 },
+  2: { Q: [261.45, -70.00, 100.00], wc: [261.45, -155.55, 71.45], arm: 85.55, seatTop: [261.45, -118.00, 140.85], L0: 47.50, ratio: 0.561 },
+  3: { Q: [-261.47, -70.00, 100.00], wc: [-261.47, -155.49, 71.46], arm: 85.49, seatTop: [-261.47, -118.00, 140.85], L0: 47.50, ratio: 0.561 }
 };
 
 const CORNERS = [
@@ -34,7 +34,7 @@ const sumY2 = CORNERS.reduce((a,c) => a + (c.y*U)**2, 0);   // мм²
 /* ---------- статика: жёсткий кузов на 4 пружинах ---------- */
 function solvePose(loads, k) {
   let S = 0, Sx = 0, Sy = 0;
-  CORNERS.forEach((c,i) => { const F = loads[i]*G; S += F; Sx += F*c.x*U; Sy += F*c.y*U; });
+  CORNERS.forEach((c,i) => { const F = loads[i]/1000*G; S += F; Sx += F*c.x*U; Sy += F*c.y*U; });
   let zmm  = S / (4*k);            // мм вниз
   let roll = Sy / (k*sumY2);       // рад, + = левый борт вниз
   let pit  = Sx / (k*sumX2);       // рад, + = нос вниз
@@ -124,10 +124,11 @@ const bodyGroup = new THREE.Group();     // сюда применяется кр
 carRoot.add(bodyGroup);
 
 const MAT = {
-  body:   new THREE.MeshStandardMaterial({ color:0xaebccb, metalness:0.28, roughness:0.38 }),
-  wheel:  new THREE.MeshStandardMaterial({ color:0x1a1d21, metalness:0.15, roughness:0.72 }),
-  sleeve: new THREE.MeshStandardMaterial({ color:0xffa733, metalness:0.35, roughness:0.4, emissive:0x3a1d00, emissiveIntensity:0.6 }),
-  beam:   new THREE.MeshStandardMaterial({ color:0x2fd3b8, metalness:0.35, roughness:0.42, emissive:0x073a33, emissiveIntensity:0.8 })
+  body:   new THREE.MeshStandardMaterial({ color:0xb9c6d4, metalness:0.05, roughness:0.52 }),
+  wheel:  new THREE.MeshStandardMaterial({ color:0x2a2e34, metalness:0.03, roughness:0.88 }),
+  sleeve: new THREE.MeshStandardMaterial({ color:0xf0a13c, metalness:0.05, roughness:0.55, emissive:0x1d0f00, emissiveIntensity:0.35 }),
+  beam:   new THREE.MeshStandardMaterial({ color:0x36c9ad, metalness:0.05, roughness:0.55, emissive:0x06302a, emissiveIntensity:0.5 }),
+  spring: new THREE.MeshStandardMaterial({ color:0xd6dee8, metalness:0.05, roughness:0.62 })
 };
 
 const arms = [];        // { group, wheelPivot, corner }
@@ -135,7 +136,22 @@ const loadLabels = [];
 
 /* ---------- загрузка ---------- */
 const loader = new GLTFLoader();
-const load = (f) => new Promise((res, rej) => loader.load(f, g => res(g.scene), undefined, rej));
+/* GLB из trimesh приходит без NORMAL (только POSITION) — без нормалей
+   MeshStandardMaterial свет не считает и модель выглядит чёрной.
+   Поэтому нормали считаем здесь и включаем плоское затенение. */
+function fixMesh(o) {
+  if (!o.isMesh) return;
+  o.geometry.computeVertexNormals();
+  o.geometry.computeBoundingSphere();
+  o.castShadow = true;
+  o.receiveShadow = true;
+  const m = o.material;
+  if (m) { m.flatShading = true; m.side = THREE.DoubleSide; m.needsUpdate = true; }
+}
+const load = (f) => new Promise((res, rej) => loader.load(f, g => {
+  g.scene.traverse(fixMesh);
+  res(g.scene);
+}, undefined, rej));
 
 (async () => {
   const [bodyScene, ...rest] = await Promise.all([
@@ -143,7 +159,8 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => res(g.scene), 
     ...CORNERS.flatMap(c => [
       load(`./assets/c${c.file}_sleeve.glb`),
       load(`./assets/c${c.file}_beam.glb`),
-      load(`./assets/c${c.file}_wheel.glb`)
+      load(`./assets/c${c.file}_wheel.glb`),
+      load(`./assets/c${c.file}_spring.glb`)
     ])
   ]);
 
@@ -152,7 +169,7 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => res(g.scene), 
   bodyGroup.add(bodyScene);
 
   CORNERS.forEach((c, i) => {
-    const [sleeveScene, beamScene, wheelScene] = rest.slice(i*3, i*3+3);
+    const [sleeveScene, beamScene, wheelScene, springScene] = rest.slice(i*4, i*4+4);
     const rig = RIG[c.file];
 
     // рычаг: группа в оси качания, качается вокруг X
@@ -177,7 +194,15 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => res(g.scene), 
     arm.add(wheelPivot);
 
     bodyGroup.add(arm);
-    arms.push({ arm, wheelPivot, corner:c, sign: Math.sign(c.y) });
+
+    // пружина: верх закреплён в кузове, низ лежит на площадке рычага → сжимается
+    springScene.traverse(o => { if (o.isMesh) { o.material = MAT.spring; o.castShadow = true; } });
+    const spring = new THREE.Group();
+    spring.position.fromArray(rig.seatTop);
+    spring.add(springScene);
+    bodyGroup.add(spring);
+
+    arms.push({ arm, wheelPivot, spring, rig, corner:c, sign: Math.sign(c.y) });
   });
 
   document.getElementById('loading').style.opacity = 0;
@@ -191,9 +216,9 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => res(g.scene), 
 
 /* ============================ нагрузка ============================ */
 const state = {
-  loads: [0,0,0,0],     // целевые, кг
+  loads: [0,0,0,0],     // целевые, г
   cur:   [0,0,0,0],     // сглаженные
-  k: 30,
+  k: 0.7,
   demo: false,
   xray: false
 };
@@ -204,15 +229,15 @@ const sliders = CORNERS.map((c, i) => {
   const row = document.createElement('div');
   row.className = 'row';
   row.innerHTML = `<span class="tag">${c.short}</span>
-    <input type="range" min="0" max="${MAXLOAD}" step="5" value="0" id="s-${c.id}">
-    <span class="val" id="v-${c.id}">0 кг</span>`;
+    <input type="range" min="0" max="${MAXLOAD}" step="25" value="0" id="s-${c.id}">
+    <span class="val" id="v-${c.id}">0 г</span>`;
   slidersEl.appendChild(row);
   const inp = row.querySelector('input');
   const out = row.querySelector('.val');
   inp.addEventListener('input', () => {
     stopDemo();
     state.loads[i] = +inp.value;
-    out.textContent = inp.value + ' кг';
+    out.textContent = inp.value + ' г';
   });
   return { inp, out };
 });
@@ -221,7 +246,7 @@ function setLoads(arr) {
   state.loads = arr.slice();
   CORNERS.forEach((c,i) => {
     sliders[i].inp.value = Math.round(arr[i]);
-    sliders[i].out.textContent = Math.round(arr[i]) + ' кг';
+    sliders[i].out.textContent = Math.round(arr[i]) + ' г';
   });
 }
 
@@ -232,13 +257,13 @@ function stopDemo() {
 }
 
 /* ---------- сценарии ---------- */
-const PRESETS = {
+const PRESETS = {          // граммы на угол
   zero:  [0,0,0,0],
-  fl:    [100,0,0,0],
-  roof:  [50,50,50,50],
-  trunk: [0,0,90,90],
-  side:  [80,0,80,0],
-  diag:  [100,0,0,100]
+  fl:    [500,0,0,0],
+  roof:  [375,375,375,375],   // 1.5 кг на крышу
+  trunk: [0,0,400,400],       // 0.8 кг в багажник
+  side:  [0,0,800,800],       // 1.6 кг на левый борт
+  diag:  [750,0,0,750]        // 1.5 кг по диагонали
 };
 document.querySelectorAll('[data-preset]').forEach(b => {
   b.addEventListener('click', () => {
@@ -299,7 +324,7 @@ renderer.domElement.addEventListener('pointerup', e => {
     if (d < bd) { bd = d; best = i; }
   });
   stopDemo();
-  const delta = e.shiftKey ? -40 : 40;
+  const delta = e.shiftKey ? -250 : 250;
   state.loads[best] = Math.min(MAXLOAD, Math.max(0, state.loads[best] + delta));
   setLoads(state.loads);
 });
@@ -361,7 +386,7 @@ function animate() {
   // демо-режим: перекачка нагрузки влево-вправо
   if (state.demo) {
     const s = Math.sin(t0*1.1);
-    const Lv = Math.max(0, s)*110, Rv = Math.max(0, -s)*110;
+    const Lv = Math.max(0, s)*800, Rv = Math.max(0, -s)*800;
     setLoads([Lv, Rv, Lv*0.8, Rv*0.8]);
   }
 
@@ -382,6 +407,10 @@ function animate() {
     const alpha = a.sign * Math.asin(THREE.MathUtils.clamp(d / (RIG[a.corner.file].arm || ARM), -0.999, 0.999));
     a.arm.rotation.x = alpha;
     a.wheelPivot.rotation.x = -alpha;              // колесо остаётся вертикальным
+    if (a.spring) {                                // пружина сжимается/разжимается
+      const dy = d * (a.rig.ratio || 0.6);
+      a.spring.scale.z = Math.max(0.35, (a.rig.L0 - dy) / a.rig.L0);
+    }
   });
 
   // телеметрия
