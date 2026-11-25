@@ -3,22 +3,22 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 /* ============================================================
-   Tayron · активная подвеска на балках из пользовательского
-   печатного проекта (Single_color.3mf), масштаб ×2.2
+   Tayron · пружинная подвеска: рычаг качается в арке, на его конце
+   балка 217 с втулкой 224, колесо насажено на втулку. Масштаб ×1.62
    ============================================================ */
 
 const U        = 5.3327;   // мм на 1 единицу модели (база 2789 мм / 523 ед.)
-const ARM      = 80;       // рычаг: ось качания → центр колеса, ед.
-const TRAVEL   = 12.7;     // ход вверх до арки, ед. (±68 мм)
+const ARM      = 114;      // рычаг: шарнир в арке → центр колеса, ед.
+const TRAVEL   = 11.5;     // ход вверх до арки, ед. (62 мм — упор в арку)
 const MAXLOAD  = 200;      // кг на угол
 const G        = 9.81;
 
 // геометрия механизма: файл модели → ось качания Q и центр колеса wc
 const RIG = {
-  0: { Q: [-261.82,  74.92, 70.10], wc: [-261.59,  154.91, 71.45] },
-  1: { Q: [ 262.90,  75.00, 69.50], wc: [ 261.40,  154.90, 71.40] },
-  2: { Q: [ 261.20, -75.50, 71.10], wc: [ 261.40, -155.50, 71.40] },
-  3: { Q: [-263.10, -75.50, 72.70], wc: [-261.50, -155.50, 71.50] }
+  0: { Q: [-270.21, 60.51, 134.92], wc: [-261.59, 154.91, 71.45], arm: 114.1 },
+  1: { Q: [252.79, 60.50, 134.87], wc: [261.41, 154.91, 71.40], arm: 114.1 },
+  2: { Q: [252.83, -102.98, 169.16], wc: [261.45, -155.55, 71.45], arm: 111.3 },
+  3: { Q: [-270.09, -103.02, 169.17], wc: [-261.47, -155.49, 71.46], arm: 111.2 }
 };
 
 const CORNERS = [
@@ -155,18 +155,17 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => res(g.scene), 
     const [sleeveScene, beamScene, wheelScene] = rest.slice(i*3, i*3+3);
     const rig = RIG[c.file];
 
-    // втулка — жёстко в кузове
-    const sleeve = new THREE.Group();
-    sleeve.position.fromArray(rig.Q);
-    sleeveScene.traverse(o => { if (o.isMesh) { o.material = MAT.sleeve; o.castShadow = true; } });
-    sleeve.add(sleeveScene);
-    bodyGroup.add(sleeve);
-
     // рычаг: группа в оси качания, качается вокруг X
     const arm = new THREE.Group();
     arm.position.fromArray(rig.Q);
     beamScene.traverse(o => { if (o.isMesh) { o.material = MAT.beam; o.castShadow = true; } });
     arm.add(beamScene);
+
+    // ось (балка 217 + втулка 224) жёстко в рычаге
+    const axle = new THREE.Group();
+    sleeveScene.traverse(o => { if (o.isMesh) { o.material = MAT.sleeve; o.castShadow = true; } });
+    axle.add(sleeveScene);
+    arm.add(axle);
 
     // колесо — в pivot, который компенсирует качание (колесо остаётся вертикальным)
     const wpOffset = new THREE.Vector3().fromArray(rig.wc).sub(new THREE.Vector3().fromArray(rig.Q));
@@ -380,7 +379,7 @@ function animate() {
   // рычаги и колёса
   arms.forEach((a, i) => {
     const d = pose.disp[i];                        // ед., + вниз
-    const alpha = a.sign * Math.asin(THREE.MathUtils.clamp(d / ARM, -0.999, 0.999));
+    const alpha = a.sign * Math.asin(THREE.MathUtils.clamp(d / (RIG[a.corner.file].arm || ARM), -0.999, 0.999));
     a.arm.rotation.x = alpha;
     a.wheelPivot.rotation.x = -alpha;              // колесо остаётся вертикальным
   });
