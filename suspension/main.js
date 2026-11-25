@@ -218,7 +218,7 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
     linkGroup.add(linkScene);
     bodyGroup.add(linkGroup);
 
-    // колесо: своя группа, ходит вертикально относительно кузова
+    // колесо: своя группа, ходит вертикально относительно кузова и крутится вокруг оси Y
     const wheelGroup = new THREE.Group();
     wheelScene.traverse(o => { if (o.isMesh) { o.material = MAT.wheel; o.castShadow = true; } });
     wheelScene.position.fromArray(rig.wc).multiplyScalar(-1);   // меш экспортирован в абсолютных координатах
@@ -248,7 +248,7 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
 
     // базовая позиция колеса — в абсолютных координатах модели
     wheelGroup.position.fromArray(rig.wc);
-    arms.push({ linkGroup, meshes, wheelGroup, rig, corner: c, signY: Math.sign(c.y) });
+    arms.push({ linkGroup, meshes, wheelGroup, rig, corner: c, signY: Math.sign(c.y), spin: Math.random()*6.28 });
   });
 
   document.getElementById('loading').style.opacity = 0;
@@ -271,7 +271,8 @@ const state = {
   cur:   [0,0,0,0],     // сглаженные
   k: 0.63,
   demo: false,
-  xray: false
+  xray: false,
+  spin: false
 };
 
 /* ---------- ползунки ---------- */
@@ -344,6 +345,12 @@ if (exSlider) exSlider.addEventListener('input', e => {
 });
 const shakeBtn = document.getElementById('shake');
 if (shakeBtn) shakeBtn.addEventListener('click', () => { kick(520); });
+const spinBtn = document.getElementById('spin');
+if (spinBtn) spinBtn.addEventListener('click', () => {
+  state.spin = !state.spin;
+  spinBtn.classList.toggle('on', state.spin);
+  spinBtn.textContent = state.spin ? '⏸ Остановить колёса' : '▶ Крутить колёса';
+});
 const massEl = document.getElementById('mass');
 if (massEl) massEl.addEventListener('input', e => {
   setMass(+e.target.value);
@@ -492,6 +499,8 @@ function animate() {
                               a.rig.wc[1] + a.signY*330*ex,
                               a.rig.wc[2] + 30*ex + d);
     a.linkGroup.position.set(0, a.signY*150*exL, 40*exL);
+    if (state.spin) a.spin += dt * 6.0;                       // колесо крутится вокруг своей оси
+    a.wheelGroup.rotation.y = a.spin;
     a.meshes.forEach(g => {
       const { orig, f } = g.userData;
       const arr = g.attributes.position.array;
