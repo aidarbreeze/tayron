@@ -15,10 +15,10 @@ const G        = 9.81;
 
 // геометрия механизма: файл модели → ось качания Q и центр колеса wc
 const RIG = {
-  0: { Q: [-261.59, 70.00, 100.00], wc: [-261.59, 154.91, 71.45], arm: 84.91, seatTop: [-261.59, 118.00, 140.74], L0: 47.50, ratio: 0.565 },
-  1: { Q: [261.41, 70.00, 100.00], wc: [261.41, 154.91, 71.40], arm: 84.91, seatTop: [261.41, 118.00, 140.72], L0: 47.50, ratio: 0.565 },
-  2: { Q: [261.45, -70.00, 100.00], wc: [261.45, -155.55, 71.45], arm: 85.55, seatTop: [261.45, -118.00, 140.85], L0: 47.50, ratio: 0.561 },
-  3: { Q: [-261.47, -70.00, 100.00], wc: [-261.47, -155.49, 71.46], arm: 85.49, seatTop: [-261.47, -118.00, 140.85], L0: 47.50, ratio: 0.561 }
+  0: { Q: [-261.59, 70.00, 100.00], wc: [-261.59, 154.91, 71.45], arm: 84.91, seatTop: [-261.59, 118.00, 166.40], L0: 73.10, ratio: 0.565 },
+  1: { Q: [261.41, 70.00, 100.00], wc: [261.41, 154.91, 71.40], arm: 84.91, seatTop: [261.41, 118.00, 166.38], L0: 73.10, ratio: 0.565 },
+  2: { Q: [261.45, -70.00, 100.00], wc: [261.45, -155.55, 71.45], arm: 85.55, seatTop: [261.45, -118.00, 166.51], L0: 73.10, ratio: 0.561 },
+  3: { Q: [-261.47, -70.00, 100.00], wc: [-261.47, -155.49, 71.46], arm: 85.49, seatTop: [-261.47, -118.00, 166.51], L0: 73.10, ratio: 0.561 }
 };
 
 const CORNERS = [
@@ -242,7 +242,10 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
     spring.add(springScene);
     bodyGroup.add(spring);
 
-    arms.push({ arm, wheelPivot, spring, rig, corner:c, sign: Math.sign(c.y) });
+    const e1 = new THREE.Vector3().fromArray(rig.wc).sub(new THREE.Vector3().fromArray(rig.Q)).normalize();
+    arms.push({ arm, axle, wheelPivot, spring, rig, corner:c, sign: Math.sign(c.y),
+                baseArm: rig.Q.slice(), baseWheel: wpOffset.toArray(), baseSpring: rig.seatTop.slice(),
+                e1, signY: Math.sign(c.y) });
   });
 
   document.getElementById('loading').style.opacity = 0;
@@ -253,6 +256,11 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
     '<p style="color:#ff8a8a">Не удалось загрузить модель.<br>' + err + '</p>';
   console.error(err);
 });
+
+/* ======================= сборка / разборка ======================= */
+const exp = { v: 0, target: 0 };
+const smooth = x => (x <= 0 ? 0 : x >= 1 ? 1 : x*x*(3 - 2*x));
+const stg = (v, a, b) => smooth((v - a) / (b - a));
 
 /* ============================ нагрузка ============================ */
 const state = {
@@ -321,6 +329,16 @@ document.querySelectorAll('[data-preset]').forEach(b => {
   });
 });
 
+const exBtn = document.getElementById('explode');
+if (exBtn) exBtn.addEventListener('click', () => {
+  exp.target = exp.target > 0.5 ? 0 : 1;
+  exBtn.textContent = exp.target > 0.5 ? '◀ Собрать' : '▶ Разобрать';
+});
+const exSlider = document.getElementById('ex');
+if (exSlider) exSlider.addEventListener('input', e => {
+  exp.target = +e.target.value;
+  if (exBtn) exBtn.textContent = exp.target > 0.5 ? '◀ Собрать' : '▶ Разобрать';
+});
 const shakeBtn = document.getElementById('shake');
 if (shakeBtn) shakeBtn.addEventListener('click', () => { kick(520); });
 const massEl = document.getElementById('mass');
@@ -447,7 +465,23 @@ function animate() {
     state.cur[i] += (state.loads[i] - state.cur[i]) * Math.min(1, dt*8);
   }
 
-  const pose = stepPhys(Math.min(dt, 0.033), state.cur, state.k);
+  exp.v += (exp.target - exp.v) * Math.min(1, dt*5.5);
+  const exv = exp.v;
+  arms.forEach(a => {
+    const sw = stg(exv, 0.00, 0.35);   // колесо
+    const sa = stg(exv, 0.20, 0.55);   // балка + втулка
+    const sA = stg(exv, 0.40, 0.75);   // рычаг
+    const sS = stg(exv, 0.60, 0.95);   // пружина
+    a.wheelPivot.position.set(a.baseWheel[0], a.baseWheel[1] + a.signY*320*sw, a.baseWheel[2] + 40*sw);
+    a.axle.position.set(0, a.signY*170*sa, 0);
+    a.arm.position.set(a.baseArm[0] + a.e1.x*160*sA,
+                       a.baseArm[1] + a.e1.y*160*sA,
+                       a.baseArm[2] + a.e1.z*160*sA);
+    a.spring.position.set(a.baseSpring[0], a.baseSpring[1], a.baseSpring[2] + 210*sS);
+  });
+  const pose = (exv > 0.03)
+    ? { zmm:0, roll:0, pit:0, disp:[0,0,0,0], bottomed:false }
+    : stepPhys(Math.min(dt, 0.033), state.cur, state.k);
 
   // кузов
   bodyGroup.position.z = -pose.zmm;   // 1 ед. = 1 мм
@@ -486,6 +520,10 @@ function animate() {
     drawLabel(loadLabels[i], Math.round(state.cur[i]) + ' г', state.cur[i] > 3);
   });
 
+  if (exSlider && document.activeElement !== exSlider && Math.abs(+exSlider.value - exp.v) > 0.01) {
+    exSlider.value = exp.v.toFixed(2);
+    document.getElementById('exv').textContent = Math.round(exp.v*100) + '%';
+  }
   controls.update();
   renderer.render(scene, camera);
 }
