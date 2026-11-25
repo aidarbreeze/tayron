@@ -86,7 +86,7 @@ def border_distance(mask, off, nbr):
     return dist
 
 
-def panel_field(y, z, x, rounds=4):
+def panel_field(y, z, x, rounds=4, clip=True):
     """Гладкое поле панели x = H(y, z): робастная квадратичная аппроксимация.
 
     Возвращает H(y, z) с обрезкой аргументов по габаритам «пола» (чтобы не
@@ -106,12 +106,240 @@ def panel_field(y, z, x, rounds=4):
     ylo, yhi, zlo, zhi = y.min(), y.max(), z.min(), z.max()
 
     def H(yy, zz):
-        yy = np.clip(yy, ylo, yhi)
-        zz = np.clip(zz, zlo, zhi)
+        if clip:
+            yy = np.clip(yy, ylo, yhi)
+            zz = np.clip(zz, zlo, zhi)
         uu, ww = (yy - y0) / sy, (zz - z0) / sz
         return np.column_stack([np.ones_like(uu), uu, ww, uu * uu, uu * ww, ww * ww]) @ beta
 
     return H
+
+
+def fill_recess(P, F, nrm, off, nbr, zone_mm=(-18.0, 18.0), z_mm=(21.3, 31.7),
+                depth_mm=0.30, badge=(25.7, 4.6), skin=None):
+    """Ниша решётки: что заливать и до какой поверхности.
+
+    Область — не прямоугольник, а связная часть оболочки: всё, что в полосе
+    решётки лежит ниже «арки» (поверхности по гребням сот) и связано с полом
+    сот. Так в неё попадают и стенки ячеек, и горизонтальные плашки, но не
+    попадают кромка ниши (она выше арки), эмблема и внутренняя сторона оболочки
+    (это отдельный лист сетки, связанный с наружным только по краю кузова).
+    """
+    yy, zz = P[:, 1] / U, P[:, 2] / U
+    box = ((yy >= zone_mm[0]) & (yy <= zone_mm[1]) &
+           (zz >= z_mm[0]) & (zz <= z_mm[1]))
+    front = nrm[:, 0] > 0.5
+    cand = box & front
+    if cand.sum() < 200:
+        return None, None
+    if skin is not None:
+        A = skin
+    else:
+        crest = cand & (P[:, 0] >= np.percentile(P[cand, 0], 80))
+        A = panel_field(P[crest, 1], P[crest, 2], P[crest, 0], clip=False)
+    lev = A(P[:, 1], P[:, 2])
+    low = box & (P[:, 0] < lev - depth_mm * U)
+    # связные куски «ниже арки», в которых есть пол сот
+    comp = -np.ones(len(P), np.int32)
+    cid = 0
+    for s in np.where(low)[0]:
+        if comp[s] >= 0:
+            continue
+        stack, comp[s], has_front = [s], cid, bool(front[s])
+        while stack:
+            v = stack.pop()
+            for u in nbr[off[v]:off[v + 1]]:
+                if low[u] and comp[u] < 0:
+                    comp[u] = cid
+                    has_front = has_front or bool(front[u])
+                    stack.append(u)
+        if not has_front:
+            comp[comp == cid] = -2          # кусок без пола сот — не ниша
+        cid += 1
+    R = comp >= 0
+    # «закрыть» область по строкам z: граница тогда идёт по рамке решётки, а не
+    # зигзагом по сотам (иначе на стыке остаются заломы)
+    dz = 0.25
+    bins = np.floor((zz - zz.min()) / dz).astype(int)
+    lo = np.full(bins.max() + 1, np.inf); hi = np.full(bins.max() + 1, -np.inf)
+    for b in np.unique(bins[R]):
+        yy_r = yy[R & (bins == b)]
+        lo[b] = yy_r.min(); hi[b] = yy_r.max()
+    ok = np.isfinite(lo)
+    if ok.sum() >= 3:
+        k = np.ones(5) / 5
+        for arr in (lo, hi):
+            good = np.where(ok, arr, np.nan)
+            fill = np.interp(np.arange(len(good)), np.where(ok)[0], good[ok])
+            arr[:] = np.convolve(np.pad(fill, 2, mode='edge'), k, mode='valid')
+    inside_rows = np.zeros(len(P), bool)
+    for b in np.unique(bins):
+        row = bins == b
+        if ok[b]:
+            inside_rows |= row & (yy >= lo[b]) & (yy <= hi[b])
+    # только геометрия у самой решётки: иначе «строка» захватит заднюю часть кузова
+    near_lev = (P[:, 0] > lev - 6.0 * U) & (P[:, 0] < lev + 3.0 * U)
+    R = R | (inside_rows & box & near_lev)
+    # добить треугольники, у которых в области 2 из 3 вершин: иначе на кромке
+    # остаются «зубцы» из недорубленных граней
+    for _ in range(3):
+        add = np.zeros(len(P), bool)
+        for f in F:
+            if R[f[0]] or R[f[1]] or R[f[2]]:
+                add[f] = True
+        add &= box & near_lev
+        R = R | add
+    return R, A
+
+
+def refine_patch(P, F, patch, level_fn, max_edge):
+    """Дробить крупные треугольники заплаты, новые точки — сразу на поле.
+
+    Плотность вершин в бывших сотах неравномерная: на стенках ячеек вершин густо,
+    внутри ячеек — ни одной. После сноса на панель получаются длинные
+    треугольники («фасетки»). Здесь они дробятся по рёбрам длиннее max_edge
+    (1→2, 1→3, 1→4 — по числу раздробленных рёбер), новые вершины ставятся на то
+    же поле. Кромка заплаты не дробится, поэтому T-стыков с остальной сеткой нет.
+    """
+    pts = [list(map(float, p)) for p in P]
+    mid = {}
+
+    def midpoint(a, b):
+        key = (a, b) if a < b else (b, a)
+        if key in mid:
+            return mid[key]
+        pts.append([0.5 * (pts[a][i] + pts[b][i]) for i in range(3)])
+        mid[key] = len(pts) - 1
+        return mid[key]
+
+    faces = [list(map(int, f)) for f in patch]
+    for _ in range(6):
+        cnt = {}
+        for f in faces:
+            for a, b in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0])):
+                k = (a, b) if a < b else (b, a)
+                cnt[k] = cnt.get(k, 0) + 1
+        split = {k for k, c in cnt.items()
+                 if c == 2 and float(np.linalg.norm(np.subtract(pts[k[0]], pts[k[1]]))) > max_edge}
+        if not split:
+            break
+        out = []
+        for f in faces:
+            e = [((f[0], f[1]) if f[0] < f[1] else (f[1], f[0])),
+                 ((f[1], f[2]) if f[1] < f[2] else (f[2], f[1])),
+                 ((f[2], f[0]) if f[2] < f[0] else (f[0], f[2]))]
+            hit = [t for t in range(3) if e[t] in split]
+            if len(hit) == 0:
+                out.append(f)
+            elif len(hit) == 3:
+                m0, m1, m2 = (midpoint(*e[t]) for t in range(3))
+                out += [[f[0], m0, m2], [m0, f[1], m1], [m2, m1, f[2]], [m0, m1, m2]]
+            elif len(hit) == 1:
+                t = hit[0]
+                a, b, c = f[t], f[(t + 1) % 3], f[(t + 2) % 3]
+                m = midpoint(*e[t])
+                out += [[a, m, c], [m, b, c]]
+            else:
+                t = next(t for t in range(3) if t in hit and (t + 1) % 3 in hit)
+                a, b, c = f[t], f[(t + 1) % 3], f[(t + 2) % 3]
+                m0 = midpoint(*e[t])
+                m1 = midpoint(*e[(t + 1) % 3])
+                out += [[a, m0, c], [m0, b, m1], [m0, m1, c]]
+        faces = out
+    return pts, faces
+
+
+def slab_solid(A, body, y0, y1, z0, z1, step, thickness_mm, drop_mm=0.05,
+               only_recess=False):
+    """Плита «по уровню»: заполняет только те места, где кузов ниже поля A.
+
+    Сетка в плоскости (y, z); для каждой ячейки пускаем луч в кузов и смотрим,
+    ниже ли поверхность поля. Из подходящих ячеек собирается тело с передней
+    гранью на поле. Кромка такой плиты лежит там, где поверхность кузова выходит
+    на уровень поля, поэтому стенки не видны — получается не «пластина сверху»,
+    а залитая впадина.
+    """
+    ys = np.arange(y0, y1, step); ys = np.append(ys, y1)
+    zs = np.arange(z0, z1, step); zs = np.append(zs, z1)
+    ny, nz = len(ys), len(zs)
+    Yc, Zc = np.meshgrid((ys[:-1] + ys[1:]) / 2, (zs[:-1] + zs[1:]) / 2, indexing='ij')
+    org = np.column_stack([np.full(Yc.size, 400.0 * U), Yc.ravel(), Zc.ravel()])
+    loc, ir, _ = body.ray.intersects_location(
+        ray_origins=org, ray_directions=np.tile([-1.0, 0, 0], (Yc.size, 1)), multiple_hits=False)
+    xsurf = np.full(Yc.size, -np.inf)
+    xsurf[ir] = loc[:, 0]
+    lev = A(Yc.ravel(), Zc.ravel())
+    if only_recess:
+        mask = (xsurf < lev - drop_mm * U).reshape(ny - 1, nz - 1)
+    else:
+        mask = np.ones((ny - 1, nz - 1), bool)
+    # убираем «диагональные» контакты: они дают неманифолдные рёбра
+    for _ in range(50):
+        ch = False
+        for i in range(ny - 2):
+            for j in range(nz - 2):
+                a, b = mask[i, j], mask[i, j + 1]
+                c, d = mask[i + 1, j], mask[i + 1, j + 1]
+                if a and d and not b and not c:
+                    mask[i, j + 1] = mask[i + 1, j] = True; ch = True
+                elif b and c and not a and not d:
+                    mask[i, j] = mask[i + 1, j + 1] = True; ch = True
+        if not ch:
+            break
+
+    # вершины: передняя и задняя сетки по узлам, используемым маской
+    t = thickness_mm * U
+    used = np.zeros((ny, nz), bool)
+    for i in range(ny - 1):
+        for j in range(nz - 1):
+            if mask[i, j]:
+                used[i:i + 2, j:j + 2] = True
+    idx = -np.ones((ny, nz), np.int32)
+    Vf, Vb, faces = [], [], []
+
+    def vert(i, j, front):
+        key = (i, j)
+        if idx[i, j] < 0:
+            push(np.array([[ys[i], zs[j]]]))
+        return idx[i, j]
+
+    # проще: сначала узлы, потом грани
+    pts = np.argwhere(used)
+    for i, j in pts:
+        idx[i, j] = len(Vf)
+        lev0 = float(A(np.array([ys[i]]), np.array([zs[j]]))[0])
+        Vf.append([lev0, ys[i], zs[j]])
+        Vb.append([lev0 - t, ys[i], zs[j]])
+    n = len(Vf)
+    V = np.asarray(Vf + Vb, float)
+
+    def quad(a, b, c, d):
+        faces.append([a, b, c]); faces.append([a, c, d])
+
+    for i in range(ny - 1):
+        for j in range(nz - 1):
+            if not mask[i, j]:
+                continue
+            a, b = idx[i, j], idx[i + 1, j]
+            c, d = idx[i + 1, j + 1], idx[i, j + 1]
+            quad(a, b, c, d)                                   # перед
+            quad(a + n, d + n, c + n, b + n)                   # зад
+            # стенки там, где соседняя ячейка не заполнена
+            if i == 0 or not mask[i - 1, j]:
+                quad(a, d, d + n, a + n)
+            if i == ny - 2 or not mask[i + 1, j]:
+                quad(b, b + n, c + n, c)
+            if j == 0 or not mask[i, j - 1]:
+                quad(a, a + n, b + n, b)
+            if j == nz - 2 or not mask[i, j + 1]:
+                quad(d, c, c + n, d + n)
+    out = __import__('trimesh').Trimesh(V, np.asarray(faces), process=True)
+    out.merge_vertices()
+    out.update_faces(out.nondegenerate_faces())
+    out.fix_normals()
+    if out.volume < 0:
+        out.invert()
+    return out
 
 
 def smooth_weights(w, loc_idx, eu_sub):
@@ -133,6 +361,37 @@ def main():
     ap.add_argument('--out', default='Tayron_body_smooth_v2.3mf')
     ap.add_argument('--full', action='store_true',
                     help='снести на панель всю зону целиком, включая рёбра внутри неё')
+    ap.add_argument('--level', choices=['floor', 'crest', 'skin'], default='floor',
+                    help='к какому уровню приводить: floor — впадины сот (панель в нише), '
+                         'crest — гребни сот (видимая поверхность решётки, вровень с кузовом), '
+                         'skin — наружная панель вокруг зоны')
+    ap.add_argument('--offset-mm', type=float, default=0.0,
+                    help='сдвинуть панель вперёд (+) или назад (-) на столько мм')
+    ap.add_argument('--slab', action='store_true',
+                    help='залить решётку плитой с гладкой передней гранью (булево объединение)')
+    ap.add_argument('--slab-step-mm', type=float, default=0.6)
+    ap.add_argument('--slab-half-mm', type=float, default=19.3,
+                    help='полуширина плиты по y, мм (по умолчанию — кромка решётки)')
+    ap.add_argument('--slab-z-min-mm', type=float, default=21.6)
+    ap.add_argument('--slab-z-max-mm', type=float, default=30.9)
+    ap.add_argument('--slab-blend-mm', type=float, default=3.0,
+                    help='ширина плавного схода плиты под кузов у кромок, мм')
+    ap.add_argument('--slab-recess', action='store_true',
+                    help='заливать только те ячейки, где кузов ниже уровня (кромка по «ватерлинии»)')
+    ap.add_argument('--slab-hole-mm', type=float, default=3.4,
+                    help='радиус лунки под эмблему (0 — без лунки)')
+    ap.add_argument('--slab-thick-mm', type=float, default=1.5)
+    ap.add_argument('--fill-recess', action='store_true',
+                    help='залить нишу решётки до наружной поверхности (ровная панель под X)')
+    ap.add_argument('--fill-depth-mm', type=float, default=0.30,
+                    help='что считать нишей: всё, что ниже арки на столько мм '
+                         '(отрицательное — захватить и гребни сот)')
+    ap.add_argument('--diffuse-iters', type=int, default=0,
+                    help='итераций диффузии внутри заплаты (0 — не трогать, заломов меньше)')
+    ap.add_argument('--subdiv-mm', type=float, default=0.0,
+                    help='дробить треугольники заплаты длиннее стольких мм печати')
+    ap.add_argument('--protect-badge', action='store_true', default=True,
+                    help='не трогать эмблему (по умолчанию включено)')
     a = ap.parse_args()
 
     V = F = V0 = None
@@ -175,19 +434,149 @@ def main():
         cid += 1
     print('компонент зон:', cid)
 
+    if a.slab:
+        # поле берём по гребням сот ИСХОДНОГО кузова: там поверхность решётки
+        # симметричная и ровная, в отличие от уже сглаженного файла
+        Pb = np.zeros((len(V0), 3)); Pb[:] = V0
+        nb = vertex_normals(Pb, np.asarray(max(m3mf.read(a.base), key=lambda q: len(q[1].faces))[1].faces, np.int32))
+        yy0, zz0 = Pb[:, 1] / U, Pb[:, 2] / U
+        cand = ((np.abs(yy0) <= 18) & (zz0 >= 21.3) & (zz0 <= 31.7) & (nb[:, 0] > 0.5))
+        crest = cand & (Pb[:, 0] >= np.percentile(Pb[cand, 0], 80))
+        A = panel_field(Pb[crest, 1], Pb[crest, 2], Pb[crest, 0], clip=False)
+        # у кромок плита плавно уходит под поверхность кузова — стыка не видно
+        def Awin(y, z, _A=A, _off=a.offset_mm, _b=a.slab_blend_mm):
+            y = np.asarray(y, float); z = np.asarray(z, float)
+            def ss(t):
+                t = np.clip(t, 0.0, 1.0)
+                return t * t * (3.0 - 2.0 * t)
+            S = (ss((a.slab_half_mm - np.abs(y) / U) / _b)
+                 * ss((z / U - a.slab_z_min_mm) / _b)
+                 * ss((a.slab_z_max_mm - z / U) / _b))
+            return _A(y, z) + _off * S - 1.2 * (1.0 - S)
+
+        slab = slab_solid(Awin, __import__('trimesh').Trimesh(V, F, process=False),
+                          -a.slab_half_mm * U, a.slab_half_mm * U,
+                          a.slab_z_min_mm * U, a.slab_z_max_mm * U,
+                          a.slab_step_mm * U, a.slab_thick_mm,
+                          only_recess=a.slab_recess)
+        if a.slab_hole_mm > 0:                    # лунка под эмблему
+            cyl = __import__('trimesh').creation.cylinder(
+                radius=a.slab_hole_mm * U, height=6 * U, sections=64)
+            cyl.apply_transform(__import__('trimesh').transformations.rotation_matrix(
+                np.pi / 2, [0, 1, 0]))
+            cyl.apply_translation([72.5 * U, 0, 25.7 * U])
+            slab = __import__('trimesh').boolean.difference([slab, cyl], engine='manifold')
+        slab.apply_translation([a.offset_mm * U, 0, 0])
+        print('  плита: граней %d, объём %.2f см³' % (len(slab.faces), slab.volume / U ** 3 / 1000))
+        body = __import__('trimesh').Trimesh(V, F, process=False)   # как в файле, без склейки
+        out = __import__('trimesh').boolean.union([body, slab], engine='manifold')
+        out.remove_unreferenced_vertices()
+        m3mf.write(a.out, [('Кузов', out)],
+                   meta='Кузов: ниша решётки залита ровной панелью под гравировку')
+        print('итог: вершин %d, граней %d, объём %.2f см³, watertight %s' % (
+            len(out.vertices), len(out.faces), out.volume / U ** 3 / 1000, out.is_watertight))
+        print('записано:', a.out)
+        return
+
     moved = 0
-    for k in range(cid):
+    if a.fill_recess:
+        skin = None
+        if a.level == 'skin':
+            yy0, zz0 = P[:, 1] / U, P[:, 2] / U
+            outside = ((~zonec) & (np.abs(nrm[:, 0]) > 0.65) &
+                       (np.abs(yy0) <= 27) & (zz0 >= 19.0) & (zz0 <= 33.0) &
+                       (P[:, 0] > 65.0 * U))
+            skin = panel_field(P[outside, 1], P[outside, 2], P[outside, 0])
+        R, A = fill_recess(P, Fc, nrm, off, nbr, depth_mm=a.fill_depth_mm, skin=skin)
+        if R is None:
+            raise SystemExit('не нашёл нишу решётки в этом файле')
+        lev = A(P[:, 1], P[:, 2]) + a.offset_mm * U
+        # вес 1 в глубине, плавно к нулю у кромки области и у эмблемы: иначе на
+        # стыке вылезают «зубцы» из растянутых граней
+        rr = border_distance(R, off, nbr)
+        w = np.where(R, np.clip(rr / 2.5, 0, 1), 0.0)
+        w = w * w * (3 - 2 * w)
+        yy0, zz0 = P[:, 1] / U, P[:, 2] / U
+        bz, br = 25.7, 4.6                 # центр и радиус обода эмблемы, мм
+        rad = np.hypot(yy0, zz0 - bz)
+        w *= np.clip((rad - br) / 1.2, 0, 1)
+        shift = w[R] * (lev[R] - P[R, 0])
+        P[R, 0] += shift
+        moved = int(R.sum())
+        print('  ниша решётки: %d вершин, поднято на %.2f мм в среднем, макс %.2f мм' % (
+            R.sum(), np.abs(shift).mean() / U, np.abs(shift).max() / U))
+        if a.subdiv_mm > 0:
+            Hf = A
+            patch = [f for f in Fc if R[f[0]] and R[f[1]] and R[f[2]]]
+            rest = [f for f in Fc if not (R[f[0]] and R[f[1]] and R[f[2]])]
+            before = len(patch)
+            Pout, patch2 = refine_patch(P, Fc, patch, lambda yy, zz: Hf(yy, zz) + a.offset_mm * U,
+                                        a.subdiv_mm * U)
+            P = np.asarray(Pout, float)
+            # лёгкая диффузия внутри заплаты: убирает остаточные морщины,
+            # кромка (где заплата стыкуется с кузовом) закреплена
+            patch_arr = np.asarray(patch2, np.int64)
+            inner = np.zeros(len(P), bool)
+            inner[np.unique(patch_arr)] = True
+            border = set()
+            ecount = {}
+            for f in patch_arr:
+                for u, v in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0])):
+                    k = (min(u, v), max(u, v))
+                    ecount[k] = ecount.get(k, 0) + 1
+            for (u, v), c in ecount.items():
+                if c == 1:
+                    border.add(u); border.add(v)
+            free = inner.copy()
+            free[list(border)] = False
+            e2, off2, nbr2 = adjacency(patch_arr, len(P))
+            for _ in range(max(0, a.diffuse_iters)):
+                acc = np.zeros_like(P); cnt = np.zeros(len(P))
+                for a0, b0 in e2:
+                    acc[a0] += P[b0]; cnt[a0] += 1
+                    acc[b0] += P[a0]; cnt[b0] += 1
+                idx = np.where(free & (cnt > 0))[0]
+                P[idx] += 0.3 * (acc[idx] / cnt[idx, None] - P[idx])
+            Fc = np.asarray(rest + patch2, np.int32)
+            print('  заплата раздроблена: %d -> %d граней, вершин %d' % (
+                before, len(patch2), len(P)))
+            m3mf.write(a.out, [('Кузов', __import__('trimesh').Trimesh(P, Fc, process=False))],
+                       meta='Кузов: ниша решётки залита, панель под гравировку')
+            print('вершин %d, граней %d' % (len(P), len(Fc)))
+            print('записано:', a.out)
+            return
+    for k in ([] if a.fill_recess else range(cid)):
         sel = comp == k
         if sel.sum() < 200:                              # мелочь не трогаем
             continue
-        floorv = np.abs(nrm[sel, 0]) > 0.65               # панель, не стенки ниши
-        if floorv.sum() < 100:
-            floorv = np.ones(sel.sum(), bool)
-        H = panel_field(P[sel][floorv, 1], P[sel][floorv, 2], P[sel][floorv, 0])
-        tgt = H(P[sel, 1], P[sel, 2])
-        h = (P[sel, 0] - tgt) / U                         # высота над панелью, мм
+        if a.level == 'crest':
+            # видимая поверхность решётки — гребни сот: аппроксимируем по верхней
+            # части зоны, тогда панель встаёт вровень с кузовом, а не в нишу
+            q = np.percentile(P[sel, 0], 80)
+            floorv = P[sel, 0] >= q
+        elif a.level == 'skin':
+            # наружная панель вокруг зоны: кольца снаружи зоны, смотрящие вперёд
+            yy0, zz0 = P[:, 1] / U, P[:, 2] / U
+            outside = ((~zonec) & (np.abs(nrm[:, 0]) > 0.65) &
+                       (np.abs(yy0) <= 27) & (zz0 >= 19.0) & (zz0 <= 33.0) &
+                       (P[:, 0] > 65.0 * U))
+            selx = np.where(outside)[0]
+            floorv = None
+            Hs = panel_field(P[selx, 1], P[selx, 2], P[selx, 0])
+        else:
+            floorv = np.abs(nrm[sel, 0]) > 0.65           # панель, не стенки ниши
+            if floorv.sum() < 100:
+                floorv = np.ones(sel.sum(), bool)
+        if a.level != 'skin':
+            Hs = panel_field(P[sel][floorv, 1], P[sel][floorv, 2], P[sel][floorv, 0])
+        tgt = Hs(P[sel, 1], P[sel, 2]) + a.offset_mm * U
+        h = (P[sel, 0] - tgt) / U
         near = (np.ones_like(h) if a.full
                 else np.clip((SNAP_ZERO_MM - np.abs(h)) / (SNAP_ZERO_MM - SNAP_FULL_MM), 0, 1))
+        if a.protect_badge:                                # эмблему не трогаем
+            yy, zz = P[sel, 1] / U, P[sel, 2] / U
+            badge = (np.abs(yy) <= 4.3) & (np.abs(zz - 25.7) <= 3.4)
+            near = np.where(badge, 0.0, near)
         w2 = weight[sel] * near
         loc = -np.ones(vk, np.int32); loc[np.where(sel)[0]] = np.arange(sel.sum())
         w2 = smooth_weights(w2, loc, eu)
