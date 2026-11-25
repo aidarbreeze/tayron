@@ -9,7 +9,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const U        = 5.3327;   // мм на 1 единицу модели (база 2789 мм / 523 ед.)
 const ARM      = 84.9;     // рычаг: шарнир → центр колеса по горизонтали, ед.
-const TRAVEL   = 12.0;     // ход вверх до арки, ед. (64 мм — шина касается арки)
+const TRAVEL   = 12.0;     // ход до арки, ед. (12 мм на печати — шина касается арки)
 const MAXLOAD  = 2000;     // г на угол (напечатанная модель весит ~1.5 кг)
 const G        = 9.81;
 
@@ -28,26 +28,66 @@ const CORNERS = [
   { id:'RR', name:'Заднее правое',   short:'ЗП', file:3, x:-261.5, y:-155.5 }
 ];
 
-const sumX2 = CORNERS.reduce((a,c) => a + (c.x*U)**2, 0);   // мм²
-const sumY2 = CORNERS.reduce((a,c) => a + (c.y*U)**2, 0);   // мм²
+/* ============================================================
+   Физика: жёсткий кузов на 4 пружинах, с гравитацией и демпфером.
+   Всё в единицах модели (1 ед. = 1 мм печати), время в секундах,
+   масса в кг. Поэтому 1 Н/мм = 1000 кг/с², g = 9810 мм/с².
+   Кузов имеет 3 степени свободы: просадка z (вниз +), крен, тангаж.
+   ============================================================ */
+let   MASS   = 1.5;            // кг, кузов с колёсами
+const G_MM   = 9810;           // мм/с²
+let   ZETA   = 0.22;           // демпфирование (доля критического)
+const HARD   = 60;             // жёсткость отбойника, ×k
+let   IROLL  = MASS * 155 * 155;   // кг·мм² (половина колеи)
+let   IPITCH = MASS * 209 * 209;   // кг·мм²
+function setMass(m) { MASS = m; IROLL = m*155*155; IPITCH = m*209*209; }
 
-/* ---------- статика: жёсткий кузов на 4 пружинах ---------- */
-function solvePose(loads, k) {
-  let S = 0, Sx = 0, Sy = 0;
-  CORNERS.forEach((c,i) => { const F = loads[i]/1000*G; S += F; Sx += F*c.x*U; Sy += F*c.y*U; });
-  let zmm  = S / (4*k);            // мм вниз
-  let roll = Sy / (k*sumY2);       // рад, + = левый борт вниз
-  let pit  = Sx / (k*sumX2);       // рад, + = нос вниз
-  let disp = CORNERS.map(c => (zmm + roll*c.y*U + pit*c.x*U) / U);  // в единицах, + вниз
-  let maxD = Math.max(...disp.map(Math.abs));
-  let bottomed = false;
-  if (maxD > TRAVEL) {                       // упёрлись в арку
-    const f = TRAVEL / maxD;
-    zmm *= f; roll *= f; pit *= f; disp = disp.map(d => d*f);
-    bottomed = true;
+const phys = { z:0, vz:0, roll:0, vroll:0, pit:0, vpit:0 };
+let physTime = 0;
+
+function stepPhys(dt, loads, k) {
+  const kk = Math.max(0.05, k) * 1000;               // кг/с² на угол
+  const cc = 2 * ZETA * Math.sqrt(kk * MASS);        // кг/с
+  const s0 = MASS * G_MM / (4 * kk);                 // статическое сжатие, мм
+  const sub = 12, h = dt / sub;
+  for (let n = 0; n < sub; n++) {
+    let Fz = 0, Ty = 0, Tx = 0, Lsum = 0;
+    const comp = [0,0,0,0];
+    CORNERS.forEach((c, i) => {
+      const zc = phys.z + phys.roll*c.y + phys.pit*c.x;      // + вниз
+      const vc = phys.vz + phys.vroll*c.y + phys.vpit*c.x;
+      let sg = s0 + zc;                                       // сжатие, мм
+      let F = 0;
+      if (sg > 0) F = kk*sg + cc*vc;                          // пружина + демпфер
+      if (sg > TRAVEL) F += HARD*kk*(sg - TRAVEL);            // отбойник
+      const L = loads[i]/1000 * G_MM;                         // вес нагрузки, кг·мм/с²
+      comp[i] = Math.min(TRAVEL, Math.max(0, sg)) - s0;
+      Fz += F; Lsum += L;
+      Tx += (L - F) * c.y;                                    // момент крена
+      Ty += (L - F) * c.x;                                    // момент тангажа
+    });
+    phys.vz    += (G_MM + (Lsum - Fz)/MASS) * h;
+    phys.vroll += (Tx / IROLL) * h;
+    phys.vpit  += (Ty / IPITCH) * h;
+    phys.z     += phys.vz * h;
+    phys.roll  += phys.vroll * h;
+    phys.pit   += phys.vpit * h;
+    phys.z     = Math.max(-40, Math.min(TRAVEL + 6, phys.z));
+    phys.roll  = Math.max(-0.2, Math.min(0.2, phys.roll));
+    phys.pit   = Math.max(-0.2, Math.min(0.2, phys.pit));
+    phys._comp = comp;
   }
-  return { zmm, roll, pit, disp, bottomed };
+  physTime += dt;
+  const comp = phys._comp || [0,0,0,0];
+  return {
+    zmm: phys.z,                       // мм (= ед. модели), + вниз
+    roll: phys.roll, pit: phys.pit,
+    disp: comp,                        // сжатие каждого угла относительно статики
+    bottomed: comp.some(v => v >= TRAVEL - 0.05)
+  };
 }
+
+function kick(vz) { phys.vz += vz; }
 
 /* ============================ сцена ============================ */
 const host = document.getElementById('view');
@@ -281,6 +321,18 @@ document.querySelectorAll('[data-preset]').forEach(b => {
   });
 });
 
+const shakeBtn = document.getElementById('shake');
+if (shakeBtn) shakeBtn.addEventListener('click', () => { kick(520); });
+const massEl = document.getElementById('mass');
+if (massEl) massEl.addEventListener('input', e => {
+  setMass(+e.target.value);
+  document.getElementById('mv').textContent = (+e.target.value).toFixed(1) + ' кг';
+});
+const dampEl = document.getElementById('damp');
+if (dampEl) dampEl.addEventListener('input', e => {
+  ZETA = +e.target.value;
+  document.getElementById('dv').textContent = (+e.target.value).toFixed(2);
+});
 document.getElementById('k').addEventListener('input', e => {
   state.k = +e.target.value;
   document.getElementById('kv').textContent = state.k + ' Н/мм';
@@ -395,10 +447,10 @@ function animate() {
     state.cur[i] += (state.loads[i] - state.cur[i]) * Math.min(1, dt*8);
   }
 
-  const pose = solvePose(state.cur, state.k);
+  const pose = stepPhys(Math.min(dt, 0.033), state.cur, state.k);
 
   // кузов
-  bodyGroup.position.z = -pose.zmm / U;
+  bodyGroup.position.z = -pose.zmm;   // 1 ед. = 1 мм
   bodyGroup.rotation.set(-pose.roll, pose.pit, 0);
 
   // рычаги и колёса
@@ -422,8 +474,8 @@ function animate() {
   warnEl.style.display = pose.bottomed ? 'block' : 'none';
 
   CORNERS.forEach((c,i) => {
-    const mm = pose.disp[i]*U;                     // + вниз (сжатие)
-    const pct = Math.min(50, Math.abs(mm)/68*50);
+    const mm = pose.disp[i];                       // мм, + вниз (сжатие)
+    const pct = Math.min(50, Math.abs(mm)/TRAVEL*50);
     const f = bars[i].fill;
     f.style.width = pct + '%';
     if (mm >= 0) { f.style.left = '50%'; f.classList.remove('neg'); }
@@ -431,7 +483,7 @@ function animate() {
     bars[i].mm.textContent = (mm >= 0 ? '−' : '+') + Math.abs(Math.round(mm));
     bars[i].mm.style.color = mm >= 0 ? '#8d9aac' : '#c9a06a';
 
-    drawLabel(loadLabels[i], Math.round(state.cur[i]) + ' кг', state.cur[i] > 3);
+    drawLabel(loadLabels[i], Math.round(state.cur[i]) + ' г', state.cur[i] > 3);
   });
 
   controls.update();

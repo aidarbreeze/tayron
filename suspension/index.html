@@ -130,21 +130,32 @@
     <input type="range" id="k" min="0.3" max="2" step="0.1" value="0.7">
     <span class="val" id="kv">0.7 Н/мм</span>
   </div>
+  <div class="row">
+    <span class="tag" style="width:auto">Масса</span>
+    <input type="range" id="mass" min="0.5" max="3" step="0.1" value="1.5">
+    <span class="val" id="mv">1.5 кг</span>
+  </div>
+  <div class="row">
+    <span class="tag" style="width:auto">Демпфер</span>
+    <input type="range" id="damp" min="0.05" max="0.8" step="0.01" value="0.22">
+    <span class="val" id="dv">0.22</span>
+  </div>
   <div class="presets" style="margin-top:10px">
-    <button class="btn" id="xray">Рентген кузова</button>
+    <button class="btn" id="shake">Тряхнуть</button>
+    <button class="btn" id="xray">Рентген</button>
     <button class="btn" id="reset">Сброс камеры</button>
   </div>
 </div>
 
 <div class="panel" id="tele">
-  <h2>Положение кузова</h2>
+  <h2>Положение кузова (от покоя)</h2>
   <div class="big"><span class="k">Крен</span><span class="v" id="roll">0.0<small>°</small></span></div>
   <div class="big"><span class="k">Тангаж</span><span class="v" id="pitch">0.0<small>°</small></span></div>
   <div class="big"><span class="k">Просадка кузова</span><span class="v" id="sag">0<small>мм</small></span></div>
   <h2 style="margin-top:14px">Ход подвески по колёсам</h2>
   <div class="bars" id="bars"></div>
   <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:7px">
-    <span>сжатие ←</span><span>ход 62 мм</span><span>→ отбой</span>
+    <span>сжатие ←</span><span>ход 12 мм</span><span>→ отбой</span>
   </div>
   <div id="warn">Пробой подвески: колесо упёрлось в арку. Дальше кузов не проседает.</div>
 </div>
