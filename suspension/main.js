@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { initSculpt } from './sculpt.js';
 
 /* ============================================================
    Tayron · подвеска без пружин: S-переходник гнётся в арке, на его конце
@@ -216,6 +217,7 @@ const MAT = {
 
 const arms = [];        // { group, wheelPivot, corner }
 const loadLabels = [];
+let sculpt = null;      // инструмент «сглаживание участка» (sculpt.js)
 
 /* ---------- загрузка ---------- */
 const loader = new GLTFLoader();
@@ -249,8 +251,20 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
   pl.data = rest[rest.length - 1];
   rest.length = rest.length - 1;
 
-  bodyScene.traverse(o => { if (o.isMesh) { o.material = MAT.body; o.castShadow = true; o.receiveShadow = true; } });
+  let bodyMesh = null;
+  bodyScene.traverse(o => {
+    if (!o.isMesh) return;
+    o.material = MAT.body; o.castShadow = true; o.receiveShadow = true;
+    if (!bodyMesh) bodyMesh = o;
+  });
   bodyGroup.add(bodyScene);
+
+  // инструмент сглаживания: кисть по кузову + выгрузка 3MF (топология не меняется)
+  if (bodyMesh) {
+    try {
+      sculpt = initSculpt({ mesh: bodyMesh, material: MAT.body, camera, renderer, controls, U });
+    } catch (err) { console.error('sculpt', err); }
+  }
 
   CORNERS.forEach((c, i) => {
     const [linkScene, wheelScene] = rest.slice(i*2, i*2+2);
@@ -493,6 +507,7 @@ renderer.domElement.addEventListener('pointerup', e => {
   const moved = Math.hypot(e.clientX - downXY[0], e.clientY - downXY[1]);
   downXY = null;
   if (moved > 6) return;               // это было вращение камеры
+  if (sculpt && sculpt.mode) return;   // в режиме кисти клик не нагружает угол
   if (!bodyGroup.children.length) return;
 
   ndc.set((e.clientX/innerWidth)*2 - 1, -(e.clientY/innerHeight)*2 + 1);
