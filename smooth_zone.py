@@ -370,11 +370,11 @@ def main():
     ap.add_argument('--slab', action='store_true',
                     help='залить решётку плитой с гладкой передней гранью (булево объединение)')
     ap.add_argument('--slab-step-mm', type=float, default=0.6)
-    ap.add_argument('--slab-half-mm', type=float, default=19.3,
+    ap.add_argument('--slab-half-mm', type=float, default=21.0,
                     help='полуширина плиты по y, мм (по умолчанию — кромка решётки)')
-    ap.add_argument('--slab-z-min-mm', type=float, default=21.6)
-    ap.add_argument('--slab-z-max-mm', type=float, default=30.9)
-    ap.add_argument('--slab-blend-mm', type=float, default=3.0,
+    ap.add_argument('--slab-z-min-mm', type=float, default=21.4)
+    ap.add_argument('--slab-z-max-mm', type=float, default=31.2)
+    ap.add_argument('--slab-blend-mm', type=float, default=2.5,
                     help='ширина плавного схода плиты под кузов у кромок, мм')
     ap.add_argument('--slab-recess', action='store_true',
                     help='заливать только те ячейки, где кузов ниже уровня (кромка по «ватерлинии»)')
@@ -443,18 +443,47 @@ def main():
         cand = ((np.abs(yy0) <= 18) & (zz0 >= 21.3) & (zz0 <= 31.7) & (nb[:, 0] > 0.5))
         crest = cand & (Pb[:, 0] >= np.percentile(Pb[cand, 0], 80))
         A = panel_field(Pb[crest, 1], Pb[crest, 2], Pb[crest, 0], clip=False)
-        # у кромок плита плавно уходит под поверхность кузова — стыка не видно
-        def Awin(y, z, _A=A, _off=a.offset_mm, _b=a.slab_blend_mm):
+        # огибающая кузова (верх гребней) по сетке плиты: за неё панель не выходит
+        _gy = np.arange(-(a.slab_half_mm + 2) * U, (a.slab_half_mm + 2) * U, a.slab_step_mm * U)
+        _gz = np.arange(a.slab_z_min_mm * U, a.slab_z_max_mm * U, a.slab_step_mm * U)
+        _GY, _GZ = np.meshgrid(_gy, _gz, indexing='ij')
+        _org = np.column_stack([np.full(_GY.size, 300.0 * U), _GY.ravel(), _GZ.ravel()])
+        _base = __import__('trimesh').Trimesh(
+            np.asarray(max(m3mf.read(a.base), key=lambda q: len(q[1].faces))[1].vertices, float),
+            np.asarray(max(m3mf.read(a.base), key=lambda q: len(q[1].faces))[1].faces, np.int32),
+            process=False)
+        _loc, _ir, _ = _base.ray.intersects_location(
+            ray_origins=_org, ray_directions=np.tile([-1.0, 0, 0], (_GY.size, 1)), multiple_hits=False)
+        _E = np.full(_GY.size, np.nan); _E[_ir] = _loc[:, 0]
+        _E = _E.reshape(_GY.shape)
+        # дырки от лучей между сотами закрываем, затем «верх гребней» и сглаживание
+        _E = np.where(np.isnan(_E), np.nanmin(_E), _E)
+        from numpy.lib.stride_tricks import sliding_window_view as _swv
+        _P = np.pad(_E, 3, mode='edge')
+        _E = _swv(_P, (7, 7)).max(axis=(2, 3))
+        for _ in range(3):
+            _E = np.pad(_E, 1, mode='edge')
+            _E = _swv(_E, (3, 3)).mean(axis=(2, 3))
+
+        def Aenv(y, z, _A=A, _off=a.offset_mm, _b=a.slab_blend_mm):
             y = np.asarray(y, float); z = np.asarray(z, float)
+            fy = np.clip((y - _gy[0]) / (_gy[1] - _gy[0]), 0, len(_gy) - 1.001)
+            fz = np.clip((z - _gz[0]) / (_gz[1] - _gz[0]), 0, len(_gz) - 1.001)
+            iy = fy.astype(int); iz = fz.astype(int)
+            ty = fy - iy; tz = fz - iz
+            e = (_E[iy, iz] * (1 - ty) * (1 - tz) + _E[iy + 1, iz] * ty * (1 - tz)
+                 + _E[iy, iz + 1] * (1 - ty) * tz + _E[iy + 1, iz + 1] * ty * tz)
+            lev = np.minimum(_A(y, z) + _off * U, e + 0.05 * U)
+
             def ss(t):
                 t = np.clip(t, 0.0, 1.0)
                 return t * t * (3.0 - 2.0 * t)
             S = (ss((a.slab_half_mm - np.abs(y) / U) / _b)
                  * ss((z / U - a.slab_z_min_mm) / _b)
                  * ss((a.slab_z_max_mm - z / U) / _b))
-            return _A(y, z) + _off * S - 1.2 * (1.0 - S)
+            return lev - 0.8 * U * (1.0 - S)
 
-        slab = slab_solid(Awin, __import__('trimesh').Trimesh(V, F, process=False),
+        slab = slab_solid(Aenv, __import__('trimesh').Trimesh(V, F, process=False),
                           -a.slab_half_mm * U, a.slab_half_mm * U,
                           a.slab_z_min_mm * U, a.slab_z_max_mm * U,
                           a.slab_step_mm * U, a.slab_thick_mm,
@@ -466,7 +495,6 @@ def main():
                 np.pi / 2, [0, 1, 0]))
             cyl.apply_translation([72.5 * U, 0, 25.7 * U])
             slab = __import__('trimesh').boolean.difference([slab, cyl], engine='manifold')
-        slab.apply_translation([a.offset_mm * U, 0, 0])
         print('  плита: граней %d, объём %.2f см³' % (len(slab.faces), slab.volume / U ** 3 / 1000))
         body = __import__('trimesh').Trimesh(V, F, process=False)   # как в файле, без склейки
         out = __import__('trimesh').boolean.union([body, slab], engine='manifold')
