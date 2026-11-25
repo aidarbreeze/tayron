@@ -248,7 +248,7 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
 
     // базовая позиция колеса — в абсолютных координатах модели
     wheelGroup.position.fromArray(rig.wc);
-    arms.push({ linkGroup, meshes, wheelGroup, rig, corner: c, signY: Math.sign(c.y), spin: Math.random()*6.28 });
+    arms.push({ linkGroup, meshes, wheelGroup, rig, corner: c, signY: Math.sign(c.y), spin: 0 });
   });
 
   document.getElementById('loading').style.opacity = 0;
