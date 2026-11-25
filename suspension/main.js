@@ -159,6 +159,43 @@ grid.material.transparent = true;
 grid.material.opacity = 0.55;
 scene.add(grid);
 
+/* ---------- стол печати (появится в режиме раскладки) ---------- */
+const bedGroup = new THREE.Group();
+bedGroup.visible = false;
+scene.add(bedGroup);
+let bedReady = false;
+function buildBed(d) {
+  if (!d || bedReady) return;
+  bedReady = true;
+  const W = d.bed[0], H = d.bed[1];
+  const plane = new THREE.Mesh(
+    new THREE.PlaneGeometry(W, H),
+    new THREE.MeshStandardMaterial({ color:0x16202b, roughness:0.95, metalness:0.0,
+                                      transparent:true, opacity:0 })
+  );
+  plane.position.set(W/2, H/2, -1.2);
+  bedGroup.add(plane);
+  const edge = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.PlaneGeometry(W, H)),
+    new THREE.LineBasicMaterial({ color:0x5aa2e8, transparent:true, opacity:0 })
+  );
+  edge.position.copy(plane.position);
+  bedGroup.add(edge);
+  // сетка через 20 мм
+  const pts = [];
+  for (let mm = 20; mm < 220; mm += 20) {
+    const x = Math.min(W, mm * d.U), y = Math.min(H, mm * d.U);
+    pts.push(x, 0, 0, x, H, 0, 0, y, 0, W, y, 0);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  const grid = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+    color:0x2f4a63, transparent:true, opacity:0 }));
+  grid.position.z = -1.0;
+  bedGroup.add(grid);
+  bedGroup.userData.fade = [plane.material, edge.material, grid.material];
+}
+
 /* ---------- контейнер модели (модель Z-вверх) ---------- */
 const carRoot = new THREE.Group();
 carRoot.rotation.x = -Math.PI/2;
@@ -166,6 +203,7 @@ scene.add(carRoot);
 
 const bodyGroup = new THREE.Group();     // сюда применяется крен/тангаж/просадка
 carRoot.add(bodyGroup);
+carRoot.add(bedGroup);                   // стол — в координатах модели (z=0)
 
 const MAT = {
   body:   new THREE.MeshStandardMaterial({ color:0xb9c6d4, metalness:0.05, roughness:0.52 }),
@@ -199,13 +237,17 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
 }, undefined, rej));
 
 (async () => {
+  const plateJson = fetch('./assets/plate.json').then(r => r.json()).catch(() => null);
   const [bodyScene, ...rest] = await Promise.all([
     load('./assets/body.glb'),
     ...CORNERS.flatMap(c => [
       load(`./assets/c${c.file}_link.glb`),
       load(`./assets/c${c.file}_wheel.glb`)
-    ])
+    ]),
+    plateJson
   ]);
+  pl.data = rest[rest.length - 1];
+  rest.length = rest.length - 1;
 
   bodyScene.traverse(o => { if (o.isMesh) { o.material = MAT.body; o.castShadow = true; o.receiveShadow = true; } });
   bodyGroup.add(bodyScene);
@@ -271,6 +313,7 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
     arms.push({ linkGroup, meshes, wheelGroup, bushGroup, rig, corner: c, signY: Math.sign(c.y), spin: 0 });
   });
 
+  buildBed(pl.data);
   document.getElementById('loading').style.opacity = 0;
   setTimeout(() => document.getElementById('loading').remove(), 520);
   animate();
@@ -280,8 +323,9 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
   console.error(err);
 });
 
-/* ======================= сборка / разборка ======================= */
+/* ======================= сборка / разборка / стол ======================= */
 const exp = { v: 0, target: 0 };
+const pl  = { v: 0, target: 0, data: null };      // раскладка деталей на стол печати
 const smooth = x => (x <= 0 ? 0 : x >= 1 ? 1 : x*x*(3 - 2*x));
 const stg = (v, a, b) => smooth((v - a) / (b - a));
 
@@ -363,6 +407,44 @@ if (exSlider) exSlider.addEventListener('input', e => {
   exp.target = +e.target.value;
   if (exBtn) exBtn.textContent = exp.target > 0.5 ? '◀ Собрать' : '▶ Разобрать';
 });
+const plBtn = document.getElementById('plate');
+const plSlider = document.getElementById('plv');
+const plHint = document.getElementById('platehint');
+let camGoal = null;
+
+function bedCam() {
+  const b = (pl.data && pl.data.bbox) || [0, 0, 1180, 620];
+  const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+  const size = Math.max(b[2] - b[0], b[3] - b[1]);
+  const tgt = new THREE.Vector3(cx, 0, -cy);          // модель Z-вверх: (x,y,0) → (x,0,−y)
+  const dist = size * 1.15 + 350;      // ~1700 ед. при столе 200 мм — впереди туманa
+  return { pos: tgt.clone().add(new THREE.Vector3(dist * 0.10, dist * 0.80, dist * 0.58)), tgt };
+}
+
+function syncPlate() {
+  const on = pl.target > 0.5;
+  if (plBtn) {
+    plBtn.classList.toggle('on', on);
+    plBtn.textContent = on ? '◀ Убрать со стола' : '🖨 Разложить на стол';
+  }
+  if (plSlider) plSlider.value = pl.target;
+  const lbl = document.getElementById('plvv');
+  if (lbl) lbl.textContent = Math.round(pl.target * 100) + '%';
+  if (plHint) plHint.style.display = on ? 'block' : 'none';
+  if (on) {                                   // стол и разборка одновременно не нужны
+    exp.target = 0;
+    if (exBtn) exBtn.textContent = '▶ Разобрать';
+    if (exSlider) exSlider.value = 0;
+    const e = document.getElementById('exv');
+    if (e) e.textContent = '0%';
+    camGoal = bedCam();
+  } else {
+    camGoal = { pos: CAM_HOME.clone(), tgt: TARGET_HOME.clone() };
+  }
+}
+if (plBtn) plBtn.addEventListener('click', () => { pl.target = pl.target > 0.5 ? 0 : 1; syncPlate(); });
+if (plSlider) plSlider.addEventListener('input', e => { pl.target = +e.target.value; syncPlate(); });
+
 const shakeBtn = document.getElementById('shake');
 if (shakeBtn) shakeBtn.addEventListener('click', () => { kick(520); });
 const spinBtn = document.getElementById('spin');
@@ -386,6 +468,7 @@ document.getElementById('k').addEventListener('input', e => {
   document.getElementById('kv').textContent = state.k + ' Н/мм';
 });
 document.getElementById('reset').addEventListener('click', () => {
+  camGoal = null;
   camera.position.copy(CAM_HOME);
   controls.target.copy(TARGET_HOME);
   controls.update();
@@ -505,7 +588,9 @@ function animate() {
     a.wheelGroup.position.set(a.rig.wc[0], a.rig.wc[1] + a.signY*330*sw, a.rig.wc[2] + 30*sw);
     a.linkGroup.position.set(0, a.signY*150*sL, 40*sL);
   });
-  const pose = (exv > 0.03)
+  pl.v += (pl.target - pl.v) * Math.min(1, dt * 5.5);
+  const pk = pl.v;
+  const pose = (exv > 0.03 || pk > 0.03)
     ? { zmm:0, roll:0, pit:0, disp:[0,0,0,0], bottomed:false }
     : stepPhys(Math.min(dt, 0.033), state.cur, state.k);
 
@@ -533,6 +618,36 @@ function animate() {
       g.computeBoundingSphere();
     });
   });
+
+  // ---- раскладка на стол печати (13 деталей, те же позы, что в Tayron6_plate.3mf)
+  if (bedGroup.userData.fade) {
+    bedGroup.visible = pk > 0.004;
+    const base = [0.92, 0.95, 0.5];
+    bedGroup.userData.fade.forEach((m, i) => { m.opacity = base[i] * pk; });
+  }
+  if (pk > 0.002 && pl.data) {
+    const d = pl.data, V3 = a => new THREE.Vector3(a[0], a[1], a[2]);
+    bodyGroup.position.lerp(V3(d.body.pos), pk);
+    arms.forEach(a => {
+      const i = a.rig.i | 0;
+      a.linkGroup.position.lerp(V3(d.link[i].pos), pk);
+      a.wheelGroup.position.lerp(V3(d.wheel[i].pos), pk);
+      a.wheelGroup.rotation.x = THREE.MathUtils.degToRad(d.wheel[i].rot[0]) * pk;
+      a.wheelGroup.rotation.y = a.spin * (1 - pk);
+      a.bushGroup.position.lerp(V3(d.bush[i].pos), pk);
+      a.bushGroup.rotation.x = THREE.MathUtils.degToRad(d.bush[i].rot[0]) * pk;
+    });
+  }
+
+  // ---- плавный переход камеры (к столу и обратно)
+  if (camGoal) {
+    const kc = Math.min(1, dt * 4);
+    camera.position.lerp(camGoal.pos, kc);
+    controls.target.lerp(camGoal.tgt, kc);
+    if (camera.position.distanceTo(camGoal.pos) < 3 && controls.target.distanceTo(camGoal.tgt) < 3)
+      camGoal = null;
+    controls.update();
+  }
 
   // телеметрия
   const rollDeg = Math.abs(pose.roll)*180/Math.PI;
