@@ -390,6 +390,50 @@ def shrink_wrap(mesh, target):
     return trimesh.Trimesh(vertices=pts, faces=mesh.faces, process=False), dist
 
 
+def save_3mf(mesh, path, title='Tayron', unit='millimeter', decimals=5):
+    """Свой экспорт в 3MF: у trimesh при записи свариваются вершины и watertight
+    теряется (379 648 граней → 23 оболочки). Здесь индексы пишутся как есть.
+
+    3MF — это zip: `[Content_Types].xml`, `_rels/.rels` и `3D/3dmodel.model`.
+    """
+    import zipfile
+
+    v = np.asarray(mesh.vertices, dtype=np.float64)
+    f = np.asarray(mesh.faces, dtype=np.int64)
+    fmt = '{:.' + str(int(decimals)) + 'f}'
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<model unit="{}" xml:lang="ru-RU" '
+             'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'.format(unit),
+             '  <metadata name="Title">{}</metadata>'.format(title),
+             '  <resources>',
+             '    <object id="1" type="model">',
+             '      <mesh>',
+             '        <vertices>']
+    parts += ['          <vertex x="{}" y="{}" z="{}"/>'.format(fmt.format(a), fmt.format(b), fmt.format(c))
+              for a, b, c in v]
+    parts += ['        </vertices>', '        <triangles>']
+    parts += ['          <triangle v1="{}" v2="{}" v3="{}"/>'.format(int(a), int(b), int(c))
+              for a, b, c in f]
+    parts += ['        </triangles>', '      </mesh>', '    </object>', '  </resources>',
+              '  <build><item objectid="1"/></build>', '</model>']
+    model = '\n'.join(parts).encode('utf-8')
+
+    types = ('<?xml version="1.0" encoding="UTF-8"?>'
+             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+             '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+             '<Default Extension="model" '
+             'ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Target="/3D/3dmodel.model" Id="rel0" '
+            'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>')
+    with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        z.writestr('[Content_Types].xml', types)
+        z.writestr('_rels/.rels', rels)
+        z.writestr('3D/3dmodel.model', model)
+    return path
+
+
 def _axis_of(part, centre):
     """Ось колеса: направление наименьшего размаха, знаком — к центру кузова."""
     e, v = np.linalg.eigh(np.cov(part.vertices.T))
