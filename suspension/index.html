@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Tayron — активная подвеска · интерактивная модель</title>
+<style>
+  :root{
+    --bg:#0b0e13; --panel:rgba(18,23,31,.82); --line:rgba(255,255,255,.09);
+    --txt:#e8edf4; --dim:#8d9aac; --acc:#38e1c4; --warn:#ff5d5d; --amber:#ffb454;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  #view{position:fixed;inset:0}
+  canvas{display:block;outline:none}
+
+  .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);
+    box-shadow:0 18px 50px rgba(0,0,0,.45)}
+
+  /* ---------- заголовок ---------- */
+  #head{left:20px;top:18px;padding:14px 18px 13px;max-width:330px}
+  #head h1{margin:0;font-size:15px;letter-spacing:.2px;font-weight:650}
+  #head h1 span{color:var(--acc)}
+  #head p{margin:5px 0 0;font-size:11.5px;color:var(--dim);line-height:1.5}
+
+  /* ---------- управление ---------- */
+  #ctrl{left:20px;bottom:20px;width:330px;padding:14px 16px 16px;max-height:calc(100vh - 210px);overflow:auto}
+  #ctrl h2{margin:0 0 9px;font-size:10.5px;letter-spacing:1.3px;text-transform:uppercase;color:var(--dim);font-weight:600}
+  #ctrl h2:not(:first-child){margin-top:15px}
+  .presets{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .btn{border:1px solid var(--line);background:rgba(255,255,255,.045);color:var(--txt);
+    border-radius:9px;padding:7px 8px;font-size:11.5px;cursor:pointer;transition:.14s;text-align:center;
+    font-family:inherit;line-height:1.25}
+  .btn:hover{background:rgba(56,225,196,.13);border-color:rgba(56,225,196,.45)}
+  .btn.on{background:rgba(56,225,196,.2);border-color:var(--acc);color:#b9fff2}
+  .btn.wide{grid-column:span 2}
+
+  .row{display:flex;align-items:center;gap:9px;margin:9px 0 2px}
+  .row .tag{width:26px;font-size:10.5px;color:var(--dim);font-weight:600;letter-spacing:.4px}
+  .row .val{width:52px;text-align:right;font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--amber)}
+  input[type=range]{-webkit-appearance:none;appearance:none;flex:1;height:3px;border-radius:2px;
+    background:rgba(255,255,255,.14);outline:none;cursor:pointer}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;
+    background:var(--acc);box-shadow:0 0 0 3px rgba(56,225,196,.18);cursor:pointer}
+  input[type=range]::-moz-range-thumb{width:13px;height:13px;border:0;border-radius:50%;background:var(--acc)}
+
+  /* ---------- телеметрия ---------- */
+  #tele{right:20px;top:18px;width:296px;padding:15px 16px}
+  #tele h2{margin:0 0 11px;font-size:10.5px;letter-spacing:1.3px;text-transform:uppercase;color:var(--dim);font-weight:600}
+  .big{display:flex;justify-content:space-between;align-items:flex-end;padding:7px 0;border-bottom:1px dashed rgba(255,255,255,.07)}
+  .big:last-of-type{border:0}
+  .big .k{font-size:11.5px;color:var(--dim);padding-bottom:3px}
+  .big .v{font-size:23px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.5px;line-height:1}
+  .big .v small{font-size:11px;font-weight:400;color:var(--dim);margin-left:2px;letter-spacing:0}
+  .bars{margin-top:13px}
+  .bar{display:flex;align-items:center;gap:7px;margin:6px 0}
+  .bar .n{width:22px;font-size:10px;color:var(--dim);font-weight:600}
+  .bar .t{flex:1;height:7px;border-radius:4px;background:rgba(255,255,255,.07);position:relative;overflow:hidden}
+  .bar .t i{position:absolute;left:50%;top:0;bottom:0;background:linear-gradient(90deg,var(--acc),#4bb8ff);
+    border-radius:4px;transition:width .05s linear}
+  .bar .t i.neg{background:linear-gradient(270deg,#ffb454,#ff8a5b)}
+  .bar .mm{width:46px;text-align:right;font-size:10.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  #warn{margin-top:11px;padding:7px 10px;border-radius:8px;font-size:11px;line-height:1.35;
+    background:rgba(255,93,93,.13);border:1px solid rgba(255,93,93,.4);color:#ffb3b3;display:none}
+
+  /* ---------- подсказка ---------- */
+  #hint{left:50%;transform:translateX(-50%);bottom:20px;padding:8px 16px;font-size:11.5px;color:var(--dim);
+    white-space:nowrap;display:flex;gap:14px;align-items:center}
+  #hint b{color:var(--txt);font-weight:550}
+  #hint kbd{background:rgba(255,255,255,.09);border-radius:5px;padding:1.5px 5px;font:inherit;font-size:10.5px;color:var(--txt)}
+
+  /* ---------- инфо ---------- */
+  #about{right:20px;bottom:20px;width:296px;padding:0;overflow:hidden}
+  #about summary{padding:11px 15px;cursor:pointer;font-size:11.5px;color:var(--dim);list-style:none;
+    display:flex;justify-content:space-between;align-items:center;user-select:none}
+  #about summary::-webkit-details-marker{display:none}
+  #about summary::after{content:'＋';color:var(--acc);font-size:13px}
+  #about[open] summary::after{content:'−'}
+  #about .txt{padding:0 15px 14px;font-size:11.5px;color:#b9c4d2;line-height:1.6}
+  #about .txt b{color:var(--acc);font-weight:600}
+  #about .txt dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:3px 10px}
+  #about .txt dt{color:var(--dim)}
+  #about .txt dd{margin:0;font-variant-numeric:tabular-nums}
+
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:var(--bg);z-index:50;transition:opacity .5s;flex-direction:column;gap:12px}
+  #loading .sp{width:26px;height:26px;border:2px solid rgba(255,255,255,.15);border-top-color:var(--acc);
+    border-radius:50%;animation:sp .8s linear infinite}
+  #loading p{margin:0;font-size:12px;color:var(--dim)}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  @media (max-width:1080px){
+    #tele{width:240px;right:12px;top:12px;padding:12px}
+    #head{max-width:250px;left:12px;top:12px}
+    #ctrl{left:12px;bottom:12px;width:250px;max-height:52vh}
+    #about{display:none}
+    #hint{display:none}
+  }
+</style>
+</head>
+<body>
+<div id="view"></div>
+
+<div class="panel" id="head">
+  <h1>VW Tayron · <span>активная подвеска</span></h1>
+  <p>Ходовая часть на балках и втулках из вашей модели, перенесённая в кузов Tayron. Нагружайте кузов — рычаги качаются на втулках, кузов кренится и проседает.</p>
+</div>
+
+<div class="panel" id="ctrl">
+  <h2>Сценарии нагрузки</h2>
+  <div class="presets">
+    <button class="btn" data-preset="zero">Ровно</button>
+    <button class="btn" data-preset="fl">Нажать ПЛ</button>
+    <button class="btn" data-preset="roof">На крышу</button>
+    <button class="btn" data-preset="trunk">В багажник</button>
+    <button class="btn" data-preset="side">Набок</button>
+    <button class="btn" data-preset="diag">Диагональ</button>
+    <button class="btn wide" data-preset="demo">▶ Качание (демо)</button>
+  </div>
+
+  <h2>Нагрузка на угол, кг</h2>
+  <div id="sliders"></div>
+
+  <h2>Настройки</h2>
+  <div class="row">
+    <span class="tag" style="width:auto">Пружина</span>
+    <input type="range" id="k" min="15" max="45" step="1" value="30">
+    <span class="val" id="kv">30 Н/мм</span>
+  </div>
+  <div class="presets" style="margin-top:10px">
+    <button class="btn" id="xray">Рентген кузова</button>
+    <button class="btn" id="reset">Сброс камеры</button>
+  </div>
+</div>
+
+<div class="panel" id="tele">
+  <h2>Положение кузова</h2>
+  <div class="big"><span class="k">Крен</span><span class="v" id="roll">0.0<small>°</small></span></div>
+  <div class="big"><span class="k">Тангаж</span><span class="v" id="pitch">0.0<small>°</small></span></div>
+  <div class="big"><span class="k">Просадка кузова</span><span class="v" id="sag">0<small>мм</small></span></div>
+  <h2 style="margin-top:14px">Ход подвески по колёсам</h2>
+  <div class="bars" id="bars"></div>
+  <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:7px">
+    <span>сжатие ←</span><span>предел ±68 мм</span><span>→ отбой</span>
+  </div>
+  <div id="warn">Пробой подвески: колесо упёрлось в арку. Дальше кузов не проседает.</div>
+</div>
+
+<div class="panel" id="hint">
+  <span><b>Тяните</b> — вращение</span>
+  <span><b>Клик по кузову</b> — надавить</span>
+  <span><kbd>Shift</kbd>+клик — снять</span>
+</div>
+
+<details class="panel" id="about">
+  <summary>Как это устроено</summary>
+  <div class="txt">
+    Механизм взят из вашего печатного проекта и отмасштабирован под Tayron (×2.2).
+    <dl style="margin-top:8px">
+      <dt>Ось качания</dt><dd>втулка Ø17.6 в кармане кузова</dd>
+      <dt>Рычаг</dt><dd>балка Ø10.6, плечо 80 ед.</dd>
+      <dt>Ход</dt><dd>±12.7 ед. = ±68 мм</dd>
+      <dt>Колея</dt><dd>1655 мм</dd>
+      <dt>База</dt><dd>2789 мм</dd>
+      <dt>1 ед. модели</dt><dd>5.33 мм</dd>
+    </dl>
+  </div>
+</details>
+
+<div id="loading"><div class="sp"></div><p>Собираю модель…</p></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/addons/"
+} }
+</script>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
