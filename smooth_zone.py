@@ -250,7 +250,7 @@ def refine_patch(P, F, patch, level_fn, max_edge):
 
 
 def slab_solid(A, body, y0, y1, z0, z1, step, thickness_mm, drop_mm=0.05,
-               only_recess=False):
+               only_recess=False, mask=None):
     """Плита «по уровню»: заполняет только те места, где кузов ниже поля A.
 
     Сетка в плоскости (y, z); для каждой ячейки пускаем луч в кузов и смотрим,
@@ -269,7 +269,10 @@ def slab_solid(A, body, y0, y1, z0, z1, step, thickness_mm, drop_mm=0.05,
     xsurf = np.full(Yc.size, -np.inf)
     xsurf[ir] = loc[:, 0]
     lev = A(Yc.ravel(), Zc.ravel())
-    if only_recess:
+    if mask is not None:
+        mask = np.asarray(mask, bool)
+        assert mask.shape == (ny - 1, nz - 1), 'маска не по сетке плиты'
+    elif only_recess:
         mask = (xsurf < lev - drop_mm * U).reshape(ny - 1, nz - 1)
     else:
         mask = np.ones((ny - 1, nz - 1), bool)
@@ -374,8 +377,16 @@ def main():
                     help='полуширина плиты по y, мм (по умолчанию — кромка решётки)')
     ap.add_argument('--slab-z-min-mm', type=float, default=21.4)
     ap.add_argument('--slab-z-max-mm', type=float, default=31.2)
-    ap.add_argument('--slab-blend-mm', type=float, default=2.5,
+    ap.add_argument('--slab-level-mm', type=float, default=71.6,
+                    help='высота панели по x, мм (по умолчанию — гребни сот исходной решётки)')
+    ap.add_argument('--slab-sink-mm', type=float, default=1.8,
+                    help='на сколько плита уходит под поверхность у кромки зоны')
+    ap.add_argument('--slab-edge-cells', type=int, default=3,
+                    help='на сколько ячеек расширить плиту за закрашенную зону')
+    ap.add_argument('--slab-blend-mm', type=float, default=1.2,
                     help='ширина плавного схода плиты под кузов у кромок, мм')
+    ap.add_argument('--slab-zone', action='store_true', default=True,
+                    help='плита строго по закрашенной зоне (по умолчанию включено)')
     ap.add_argument('--slab-recess', action='store_true',
                     help='заливать только те ячейки, где кузов ниже уровня (кромка по «ватерлинии»)')
     ap.add_argument('--slab-hole-mm', type=float, default=3.4,
@@ -443,51 +454,70 @@ def main():
         cand = ((np.abs(yy0) <= 18) & (zz0 >= 21.3) & (zz0 <= 31.7) & (nb[:, 0] > 0.5))
         crest = cand & (Pb[:, 0] >= np.percentile(Pb[cand, 0], 80))
         A = panel_field(Pb[crest, 1], Pb[crest, 2], Pb[crest, 0], clip=False)
-        # огибающая кузова (верх гребней) по сетке плиты: за неё панель не выходит
-        _gy = np.arange(-(a.slab_half_mm + 2) * U, (a.slab_half_mm + 2) * U, a.slab_step_mm * U)
-        _gz = np.arange(a.slab_z_min_mm * U, a.slab_z_max_mm * U, a.slab_step_mm * U)
-        _GY, _GZ = np.meshgrid(_gy, _gz, indexing='ij')
-        _org = np.column_stack([np.full(_GY.size, 300.0 * U), _GY.ravel(), _GZ.ravel()])
-        _base = __import__('trimesh').Trimesh(
-            np.asarray(max(m3mf.read(a.base), key=lambda q: len(q[1].faces))[1].vertices, float),
-            np.asarray(max(m3mf.read(a.base), key=lambda q: len(q[1].faces))[1].faces, np.int32),
-            process=False)
-        _loc, _ir, _ = _base.ray.intersects_location(
-            ray_origins=_org, ray_directions=np.tile([-1.0, 0, 0], (_GY.size, 1)), multiple_hits=False)
-        _E = np.full(_GY.size, np.nan); _E[_ir] = _loc[:, 0]
-        _E = _E.reshape(_GY.shape)
-        # дырки от лучей между сотами закрываем, затем «верх гребней» и сглаживание
-        _E = np.where(np.isnan(_E), np.nanmin(_E), _E)
+        from scipy import ndimage as _ndi
+        from scipy.interpolate import RegularGridInterpolator as _RGI
         from numpy.lib.stride_tricks import sliding_window_view as _swv
-        _P = np.pad(_E, 3, mode='edge')
-        _E = _swv(_P, (7, 7)).max(axis=(2, 3))
-        for _ in range(3):
-            _E = np.pad(_E, 1, mode='edge')
-            _E = _swv(_E, (3, 3)).mean(axis=(2, 3))
 
-        def Aenv(y, z, _A=A, _off=a.offset_mm, _b=a.slab_blend_mm):
-            y = np.asarray(y, float); z = np.asarray(z, float)
-            fy = np.clip((y - _gy[0]) / (_gy[1] - _gy[0]), 0, len(_gy) - 1.001)
-            fz = np.clip((z - _gz[0]) / (_gz[1] - _gz[0]), 0, len(_gz) - 1.001)
-            iy = fy.astype(int); iz = fz.astype(int)
-            ty = fy - iy; tz = fz - iz
-            e = (_E[iy, iz] * (1 - ty) * (1 - tz) + _E[iy + 1, iz] * ty * (1 - tz)
-                 + _E[iy, iz + 1] * (1 - ty) * tz + _E[iy + 1, iz + 1] * ty * tz)
-            lev = np.minimum(_A(y, z) + _off * U, e + 0.05 * U)
+        _hs = a.slab_step_mm
+        _ys = np.append(np.arange(-a.slab_half_mm, a.slab_half_mm, _hs), a.slab_half_mm)
+        _zs = np.append(np.arange(a.slab_z_min_mm, a.slab_z_max_mm, _hs), a.slab_z_max_mm)
+        _cy = (_ys[:-1] + _ys[1:]) / 2; _cz = (_zs[:-1] + _zs[1:]) / 2
 
-            def ss(t):
-                t = np.clip(t, 0.0, 1.0)
-                return t * t * (3.0 - 2.0 * t)
-            S = (ss((a.slab_half_mm - np.abs(y) / U) / _b)
-                 * ss((z / U - a.slab_z_min_mm) / _b)
-                 * ss((a.slab_z_max_mm - z / U) / _b))
-            return lev - 0.8 * U * (1.0 - S)
+        # маска плиты: строго по закрашенной зоне, промежутки между сотами залиты
+        if a.slab_zone:
+            zy = V[zone_f, 1] / U; zz = V[zone_f, 2] / U
+            iy = np.clip(np.searchsorted(_ys, zy) - 1, 0, len(_cy) - 1)
+            iz = np.clip(np.searchsorted(_zs, zz) - 1, 0, len(_cz) - 1)
+            ok = (zy >= _ys[0]) & (zy <= _ys[-1]) & (zz >= _zs[0]) & (zz <= _zs[-1])
+            mask = np.zeros((len(_cy), len(_cz)), bool)
+            mask[iy[ok], iz[ok]] = True
+            mask = _ndi.binary_closing(mask, np.ones((3, 3)), border_value=0)
+            for arr in (mask, mask.T):          # сплошные полосы по строкам и столбцам
+                any_ = arr.any(axis=1)
+                lo = np.argmax(arr, axis=1)
+                hi = arr.shape[1] - 1 - np.argmax(arr[:, ::-1], axis=1)
+                idx = np.arange(arr.shape[1])[None, :]
+                arr[(idx >= lo[:, None]) & (idx <= hi[:, None]) & any_[:, None]] = True
+            mask = _ndi.binary_fill_holes(_ndi.binary_dilation(mask, np.ones((3, 3))))
+            # рабочая кромка чуть шире закрашенного: сход уходит в соты, а зона
+            # остаётся ровной до самого края
+            mask = _ndi.binary_fill_holes(
+                _ndi.binary_dilation(mask, np.ones((3, 3)), iterations=a.slab_edge_cells))
+            # жёстко не выходим за габарит закрашенного: ниже полосы начинаются
+            # фонари/губа бампера, выше — рамка
+            _y_lim = np.abs(zy).max() + 0.6
+            _z_lo, _z_hi = zz.min() - 0.2, zz.max() + 0.2
+            _ok_cells = ((np.abs(_cy)[:, None] <= _y_lim) &
+                         (_cz[None, :] >= _z_lo) & (_cz[None, :] <= _z_hi))
+            mask &= _ok_cells
+            print('  маска плиты: ячеек %d, y ±%.1f, z %.1f…%.1f мм' % (
+                mask.sum(), _y_lim, _z_lo, _z_hi))
+        else:
+            mask = np.ones((len(_cy), len(_cz)), bool)
+
+        # уровень панели — ровная плоскость на высоте гребней сот исходной
+        # решётки (перцентиль по зоне): ровно то, что нужно под гравировку
+        _GY, _GZ = np.meshgrid(_ys * U, _zs * U, indexing='ij')
+        lev = np.full(_GY.shape, (a.slab_level_mm + a.offset_mm) * U)
+
+        # у кромки маски плита плавно уходит под соты — обрыва-ступеньки не видно
+        _d = _ndi.distance_transform_edt(mask) * _hs
+        _d = np.pad(_d, ((0, 1), (0, 1)), mode='edge')
+        _t = np.clip(_d / max(a.slab_blend_mm, 1e-6), 0.0, 1.0)
+        lev = lev - (1.0 - _t * _t * (3.0 - 2.0 * _t)) * a.slab_sink_mm * U
+        _rgi = _RGI((_ys * U, _zs * U), lev, bounds_error=False, fill_value=None)
+
+        def Aenv(y, z):
+            yy = np.atleast_1d(np.asarray(y, float)); zz = np.atleast_1d(np.asarray(z, float))
+            yy, zz = np.broadcast_arrays(yy, zz)
+            out = _rgi(np.column_stack([yy.ravel(), zz.ravel()])).reshape(yy.shape)
+            return out if (np.ndim(y) or np.ndim(z)) else out.item()
 
         slab = slab_solid(Aenv, __import__('trimesh').Trimesh(V, F, process=False),
                           -a.slab_half_mm * U, a.slab_half_mm * U,
                           a.slab_z_min_mm * U, a.slab_z_max_mm * U,
                           a.slab_step_mm * U, a.slab_thick_mm,
-                          only_recess=a.slab_recess)
+                          only_recess=a.slab_recess, mask=mask)
         if a.slab_hole_mm > 0:                    # лунка под эмблему
             cyl = __import__('trimesh').creation.cylinder(
                 radius=a.slab_hole_mm * U, height=6 * U, sections=64)
