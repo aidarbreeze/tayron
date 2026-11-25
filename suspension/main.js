@@ -172,7 +172,8 @@ const MAT = {
   wheel:  new THREE.MeshStandardMaterial({ color:0x2a2e34, metalness:0.03, roughness:0.88 }),
   sleeve: new THREE.MeshStandardMaterial({ color:0xf0a13c, metalness:0.05, roughness:0.55, emissive:0x1d0f00, emissiveIntensity:0.35 }),
   beam:   new THREE.MeshStandardMaterial({ color:0x36c9ad, metalness:0.05, roughness:0.55, emissive:0x06302a, emissiveIntensity:0.5 }),
-  link:   new THREE.MeshStandardMaterial({ color:0xf0a13c, metalness:0.05, roughness:0.5, emissive:0x241000, emissiveIntensity:0.4 })
+  link:   new THREE.MeshStandardMaterial({ color:0xf0a13c, metalness:0.05, roughness:0.5, emissive:0x241000, emissiveIntensity:0.4 }),
+  bush:   new THREE.MeshStandardMaterial({ color:0xd9d2c4, metalness:0.18, roughness:0.45, emissive:0x14120e, emissiveIntensity:0.5 })
 };
 
 const arms = [];        // { group, wheelPivot, corner }
@@ -219,12 +220,30 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
     linkGroup.add(linkScene);
     bodyGroup.add(linkGroup);
 
+    // колесо и втулка лежат в одном GLB: втулка — та сетка, где меньше треугольников
+    const partsW = [];
+    wheelScene.traverse(o => { if (o.isMesh) partsW.push(o); });
+    partsW.sort((a, b) => a.geometry.attributes.position.count - b.geometry.attributes.position.count);
+    const bushMesh = partsW[0], wheelMesh = partsW[1];
+
     // колесо: своя группа, ходит вертикально относительно кузова и крутится вокруг оси Y
     const wheelGroup = new THREE.Group();
-    wheelScene.traverse(o => { if (o.isMesh) { o.material = MAT.wheel; o.castShadow = true; } });
-    wheelScene.position.fromArray(rig.wc).multiplyScalar(-1);   // меш экспортирован в абсолютных координатах
-    wheelGroup.add(wheelScene);
+    if (wheelMesh) {
+      wheelMesh.material = MAT.wheel; wheelMesh.castShadow = true;
+      wheelMesh.position.fromArray(rig.wc).multiplyScalar(-1);  // меш экспортирован в абсолютных координатах
+      wheelGroup.add(wheelMesh);
+    }
     bodyGroup.add(wheelGroup);
+
+    // втулка: вклеена в колесо, при разборке выходит первой — отдельным шагом
+    const bushGroup = new THREE.Group();
+    if (bushMesh) {
+      bushMesh.material = MAT.bush; bushMesh.castShadow = true;
+      bushMesh.position.fromArray(rig.wc).multiplyScalar(-1);
+      bushGroup.add(bushMesh);
+    }
+    bushGroup.position.fromArray(rig.wc);
+    bodyGroup.add(bushGroup);
 
     // профиль изгиба ленты: f — доля пути от корня к ступице
     const root = new THREE.Vector3().fromArray(rig.root);
@@ -249,7 +268,7 @@ const load = (f) => new Promise((res, rej) => loader.load(f, g => {
 
     // базовая позиция колеса — в абсолютных координатах модели
     wheelGroup.position.fromArray(rig.wc);
-    arms.push({ linkGroup, meshes, wheelGroup, rig, corner: c, signY: Math.sign(c.y), spin: 0 });
+    arms.push({ linkGroup, meshes, wheelGroup, bushGroup, rig, corner: c, signY: Math.sign(c.y), spin: 0 });
   });
 
   document.getElementById('loading').style.opacity = 0;
@@ -479,8 +498,10 @@ function animate() {
   exp.v += (exp.target - exp.v) * Math.min(1, dt*5.5);
   const exv = exp.v;
   arms.forEach(a => {
+    const sb = stg(exv, 0.30, 0.62);   // втулка — своим шагом, выпадает из паза вниз
     const sw = stg(exv, 0.00, 0.40);   // колесо
-    const sL = stg(exv, 0.30, 0.75);   // S-переходник
+    const sL = stg(exv, 0.40, 0.82);   // S-переходник
+    a.bushGroup.position.set(a.rig.wc[0], a.rig.wc[1] - a.signY*22*sb, a.rig.wc[2] - 130*sb);
     a.wheelGroup.position.set(a.rig.wc[0], a.rig.wc[1] + a.signY*330*sw, a.rig.wc[2] + 30*sw);
     a.linkGroup.position.set(0, a.signY*150*sL, 40*sL);
   });
@@ -495,7 +516,8 @@ function animate() {
   // колёса ходят вертикально относительно кузова, S-лента при этом гнётся
   arms.forEach((a, i) => {
     const d = pose.disp[i] * U;                    // ед. модели, + вниз (сжатие)
-    const ex = stg(exv, 0.00, 0.40), exL = stg(exv, 0.30, 0.75);
+    const exB = stg(exv, 0.30, 0.62), ex = stg(exv, 0.00, 0.40), exL = stg(exv, 0.40, 0.82);
+    a.bushGroup.position.set(a.rig.wc[0], a.rig.wc[1] - a.signY*22*exB, a.rig.wc[2] - 130*exB);
     a.wheelGroup.position.set(a.rig.wc[0],
                               a.rig.wc[1] + a.signY*330*ex,
                               a.rig.wc[2] + 30*ex + d);
