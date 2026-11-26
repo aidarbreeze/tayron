@@ -1293,13 +1293,41 @@ export function initSculpt(opts) {
 
     pushHist();
     let moved = 0, maxd = 0, sumd = 0, same = 0;
+    const oldPos = new Float32Array(pos.length);      // куда вернуть, если схлопнется грань
+    const wasMoved = new Uint8Array(pos.length / 3);
     for (let i = 0; i < plan.length; i += 5) {
       const v = plan[i], o = v * 3, d = plan[i + 4];
       if (d > maxd) maxd = d;
       sumd += d;
       if (d < 1e-4) same++;
+      oldPos[o] = pos[o]; oldPos[o + 1] = pos[o + 1]; oldPos[o + 2] = pos[o + 2];
+      wasMoved[v] = 1;
       pos[o] = plan[i + 1]; pos[o + 1] = plan[i + 2]; pos[o + 2] = plan[i + 3];
       moved++;
+    }
+    /* Грань, у которой после переезда вершин площадь стала нулевой, — возвращаем
+       её вершины на прежние места (на тонких кромках луч идёт почти по
+       поверхности и может уронить вершину в соседнюю). Так копия никогда не
+       ломает сетку. */
+    let reverted = 0;
+    for (let pass = 0; pass < 4; pass++) {
+      let fixed = 0;
+      for (let f = 0; f < liveIndex.length; f += 3) {
+        const a = canon[liveIndex[f]], b = canon[liveIndex[f + 1]], c = canon[liveIndex[f + 2]];
+        if (!wasMoved[a] && !wasMoved[b] && !wasMoved[c]) continue;
+        const ao = a * 3, bo = b * 3, co = c * 3;
+        const e1x = pos[bo] - pos[ao], e1y = pos[bo + 1] - pos[ao + 1], e1z = pos[bo + 2] - pos[ao + 2];
+        const e2x = pos[co] - pos[ao], e2y = pos[co + 1] - pos[ao + 1], e2z = pos[co + 2] - pos[ao + 2];
+        if (Math.hypot(e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x) * 0.5 >= 1e-9) continue;
+        for (const v of [a, b, c]) {
+          if (!wasMoved[v]) continue;
+          const o = v * 3;
+          pos[o] = oldPos[o]; pos[o + 1] = oldPos[o + 1]; pos[o + 2] = oldPos[o + 2];
+          wasMoved[v] = 0; moved--; reverted++;
+        }
+        fixed++;
+      }
+      if (!fixed) break;
     }
     nrm = null; regionFront = null;
     flush();
@@ -1311,7 +1339,8 @@ export function initSculpt(opts) {
         `(${sideName[0]} → ${sideName[1]}), макс. сдвиг ${(maxd / U).toFixed(2)} мм, ` +
         `средний ${(sumd / moved / U).toFixed(2)} мм` +
         (same ? `, уже совпадало ${same}` : '') +
-        (far ? ` (луч мимо у ${far})` : '') + ' · сетка ' +
+        (far ? `, луч мимо у ${far}` : '') +
+        (reverted ? `, на место возвращено ${reverted} (не дали грани схлопнуться)` : '') + ' · сетка ' +
         (bad ? `<span style="color:var(--warn)">⚠ дыр ${m.openEdges}, перевёрнутых ${m.flipEdges}, ` +
           `вырожденных ${m.degenerate}</span>` : 'цела (0 дыр, 0 перевёрнутых, 0 вырожденных)');
     }
@@ -1502,7 +1531,7 @@ export function initSculpt(opts) {
   const info     = $('sc-info');
   const chip     = $('sc-toolchip');
   const TOOL_NAMES = { select: 'участок', erase: 'ластик', pen: 'перо', shape: 'фигура',
-    point: 'точка', measure: 'измерение' };
+    point: 'точка', measure: 'измерение', rect: 'рамка' };
   function syncChip() {
     if (!chip) return;
     if (!tool) { chip.textContent = 'просмотр'; chip.classList.add('idle'); return; }
@@ -1752,6 +1781,7 @@ export function initSculpt(opts) {
   if (btnShape) btnShape.addEventListener('click', () => setTool('shape'));
   if (btnMeas) btnMeas.addEventListener('click', () => setTool('measure'));
   if (btnPoint) btnPoint.addEventListener('click', () => setTool('point'));
+  if (btnRect) btnRect.addEventListener('click', () => setTool('rect'));
 
   /* ограничение правок лицевыми гранями */
   const chkFront = $('sc-front');
