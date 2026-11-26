@@ -8,6 +8,8 @@
         «⬇ Вдавить» (сдвиг вдоль нормалей).
    2. ✏ Рисовать — перо: валик по штриху (Shift — канавка).
    3. ◆ Фигура — вдавливает в кузов сферу / цилиндр / куб (Shift — купол).
+     В пятне касания сетка сначала сгущается до размера кисти, потом штампует —
+     работает и на грубой сетке (куб 20 мм), и на мелкой (кузов).
    4. ⌫ Ластик — удаляет точки (подсвечены красными точками), дырка зашивается
       треугольниками по своей кромке.
    5. 📏 Измерить — две точки на поверхности, расстояние в мм.
@@ -328,6 +330,12 @@ export function initSculpt(opts) {
         if (c === a || c === b || c === nvFile) continue;
         if (!inCircle(a, b, c, nvFile, src)) continue;
         const nb = triNormal(x, y, z, src);
+        /* вторая грань должна лежать в той же плоскости (переворот через ребро
+           куба/подоконник проваливал бы треугольник внутрь детали) */
+        const n0 = triNormal(nvFile, a, b, src);
+        const l0 = Math.hypot(...n0), lb = Math.hypot(...nb);
+        if (l0 < 1e-12 || lb < 1e-12) continue;
+        if ((n0[0] * nb[0] + n0[1] * nb[1] + n0[2] * nb[2]) / (l0 * lb) < 0.85) continue;
         const n1 = triNormal(nvFile, a, c, src), n2 = triNormal(nvFile, c, b, src);
         const l1 = Math.hypot(...n1), l2 = Math.hypot(...n2);
         if (l1 < 1e-12 || l2 < 1e-12) continue;             // вырожденные — не трогаем
@@ -693,7 +701,7 @@ export function initSculpt(opts) {
   /** Сгустить сетку в пятне кисти: расщепляем грани, у которых ребро длиннее
       шага, пока в пятне не станет достаточно узлов. Потом эти узлы и вдавливаем
       — фигура получается жёсткой, а не «размазанной» по трём большим граням. */
-  function refineAt(center, radius, spacing, maxAdd = 260) {
+  function refineAt(center, radius, spacing, maxAdd = 400) {
     const r2 = radius * radius, s2 = spacing * spacing;
     const maxEdge2 = (i0, i1, i2) => {
       const e = (a, b) => {
@@ -706,28 +714,99 @@ export function initSculpt(opts) {
       (src[i0 * 3] + src[i1 * 3] + src[i2 * 3]) / 3,
       (src[i0 * 3 + 1] + src[i1 * 3 + 1] + src[i2 * 3 + 1]) / 3,
       (src[i0 * 3 + 2] + src[i1 * 3 + 2] + src[i2 * 3 + 2]) / 3];
+    /* ближайшая к центру кисти точка грани (нужна и для отбора, и для разреза:
+       на грубой сетке грань может быть больше кисти целиком) */
+    const near = (i0, i1, i2) => {
+      const p = (i) => [src[i * 3], src[i * 3 + 1], src[i * 3 + 2]];
+      const A = p(i0), B = p(i1), C = p(i2);
+      const ux = B[0] - A[0], uy = B[1] - A[1], uz = B[2] - A[2];
+      const vx = C[0] - A[0], vy = C[1] - A[1], vz = C[2] - A[2];
+      const wx = center[0] - A[0], wy = center[1] - A[1], wz = center[2] - A[2];
+      const d00 = ux * ux + uy * uy + uz * uz, d01 = ux * vx + uy * vy + uz * vz;
+      const d11 = vx * vx + vy * vy + vz * vz;
+      const d20 = wx * ux + wy * uy + wz * uz, d21 = wx * vx + wy * vy + wz * vz;
+      const den = d00 * d11 - d01 * d01;
+      let u = 1 / 3, v = 1 / 3, w = 1 / 3;
+      if (Math.abs(den) > 1e-14) {
+        v = (d11 * d20 - d01 * d21) / den;
+        w = (d00 * d21 - d01 * d20) / den;
+        u = 1 - v - w;
+      }
+      /* зажимаем внутрь треугольника: ближайшая точка */
+      const cl = (x) => Math.max(0, Math.min(1, x));
+      u = cl(u); v = cl(v); w = 1 - u - v;
+      if (w < 0) { const k = (v + w) || 1; v /= k; w = 0; u = 1 - v; }
+      if (w > 1) { w = 1; u = 0; v = 0; }
+      const q = [
+        A[0] + ux * v + vx * w, A[1] + uy * v + vy * w, A[2] + uz * v + vz * w];
+      const d2 = (q[0] - center[0]) ** 2 + (q[1] - center[1]) ** 2 + (q[2] - center[2]) ** 2;
+      return { d2, p: q };
+    };
     const list = [];
     for (let f = 0; f < liveIndex.length / 3; f++) {
       const b = f * 3;
       const i0 = liveIndex[b], i1 = liveIndex[b + 1], i2 = liveIndex[b + 2];
       if (maxEdge2(i0, i1, i2) <= s2) continue;
-      const c = cen(i0, i1, i2);
-      const d2 = (c[0] - center[0]) ** 2 + (c[1] - center[1]) ** 2 + (c[2] - center[2]) ** 2;
-      if (d2 > r2) continue;
+      if (near(i0, i1, i2).d2 > r2) continue;      // грань задевает пятно кисти
       list.push(f);
     }
+    /* карта уже существующих узлов — чтобы не вставить точку поверх соседней
+       (иначе появляются совпавшие вершины и вырожденные треугольники) */
+    const cell = 0.1;
+    const grid = new Map();
+    const keyOf = (p) => `${Math.round(p[0] / cell)}|${Math.round(p[1] / cell)}|${Math.round(p[2] / cell)}`;
+    for (let v = 0; v < vk; v++) {
+      const p = [pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]];
+      const k = keyOf(p);
+      const e = grid.get(k); if (e) e.push(p); else grid.set(k, [p]);
+    }
+    const tooClose = (p) => {
+      const cx = Math.round(p[0] / cell), cy = Math.round(p[1] / cell), cz = Math.round(p[2] / cell);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const e = grid.get(`${cx + dx}|${cy + dy}|${cz + dz}`);
+        if (!e) continue;
+        for (const q of e) {
+          if (Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 0.05) return true;
+        }
+      }
+      return false;
+    };
+    const remember = (p) => {
+      const k = keyOf(p);
+      const e = grid.get(k); if (e) e.push(p); else grid.set(k, [p]);
+    };
+    /* сколько узлов уже есть в пятне: если сетка там и так достаточно частая,
+       сгущение прекращаем — лишние точки только замедляют клик. Сколько узлов
+       должно быть на диске радиуса r при шаге s: πr² / (0.87 s²) ≈ 3.6 r²/s². */
+    let inside = 0;
+    for (let v = 0; v < vk; v++) {
+      const dx = src[v * 3] - center[0], dy = src[v * 3 + 1] - center[1], dz = src[v * 3 + 2] - center[2];
+      if (dx * dx + dy * dy + dz * dz <= r2) inside++;
+    }
+    const target = Math.ceil(3.6 * r2 / (spacing * spacing));
     let added = 0;
-    while (list.length && added < maxAdd) {
+    while (list.length && added < maxAdd && inside + added < target) {
       const f = list.shift();
       const b = f * 3;
       if (b + 2 >= liveIndex.length) continue;
       const i0 = liveIndex[b], i1 = liveIndex[b + 1], i2 = liveIndex[b + 2];
       if (maxEdge2(i0, i1, i2) <= s2) continue;
+      const nc = near(i0, i1, i2);
+      if (nc.d2 > r2) continue;
+      /* точку ставим ближайшую к кисти; если она легла на вершину/ребро или
+         рядом уже есть узел — сдвигаемся к центру грани, пока место не станет
+         свободным (иначе появятся совпавшие узлы и вырожденные треугольники) */
       const c = cen(i0, i1, i2);
-      const d2 = (c[0] - center[0]) ** 2 + (c[1] - center[1]) ** 2 + (c[2] - center[2]) ** 2;
-      if (d2 > r2) continue;
-      const res = insertPointAt(f, c, false);      // в сгущении иголок нет — перевороты не нужны
-      if (!res.ok) continue;
+      let res = null;
+      for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+        const p = [nc.p[0] + (c[0] - nc.p[0]) * t,
+                   nc.p[1] + (c[1] - nc.p[1]) * t,
+                   nc.p[2] + (c[2] - nc.p[2]) * t];
+        if (tooClose(p)) continue;
+        res = insertPointAt(f, p, false);          // в сгущении иголок нет — перевороты не нужны
+        if (res.ok) { remember(p); break; }
+      }
+      if (!res || !res.ok) continue;
       added++;
       for (let k = 0; k < list.length; k++) if (list[k] > f) list[k] += 2;
       list.push(f, f + 1, f + 2);
@@ -948,7 +1027,9 @@ export function initSculpt(opts) {
       '■ куб, размер — «Кисть», глубина — «Глубина»). В пятне касания сетка сначала ' +
       'сгущается — добавляются точки по размеру кисти, — а потом эти точки ' +
       'вдавливаются на полную глубину: штамп получается жёстким, с плоским дном и ' +
-      'резкой кромкой. С зажатым <b>Shift</b> — купол наружу.',
+      'резкой кромкой. Сгущение работает и на грубой сетке (куб с рёбрами 20 мм), ' +
+      'и на мелочи: грань отбирается по расстоянию до треугольника, а не до его ' +
+      'центра. С зажатым <b>Shift</b> — купол наружу.',
     measure: 'Два клика по поверхности — расстояние в мм (и разница по осям). ' +
       'Третий клик начинает новую пару.',
     point: '<b>Клик или протяжка по кузову</b> — новая точка ровно на существующей ' +
