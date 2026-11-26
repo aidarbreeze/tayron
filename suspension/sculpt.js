@@ -32,7 +32,9 @@ import {
   mirrorDeltas, checkMesh
 } from './meshops.js';
 
-const MAXSTEPS = 600;   // итераций за одно нажатие при «Степень» 100 %
+const MAXSTEPS = 60;    // итераций за одно нажатие при «Степень» 100 %
+                        // (было 600: одно нажатие на 25 % утаскивало узел на 1.6 мм —
+                        //  это уже не «сгладить», а вмятина)
 const LAMBDA   = 0.5;   // доля шага диффузии
 const SHAPE_NAMES = { sphere: 'сфера', cylinder: 'цилиндр', box: 'куб' };
 
@@ -358,7 +360,10 @@ export function initSculpt(opts) {
     if (!h) return;
     if (lastPt) {
       const dx = h.p[0] - lastPt[0], dy = h.p[1] - lastPt[1], dz = h.p[2] - lastPt[2];
-      if (dx * dx + dy * dy + dz * dz < (0.35 * U * 0.01) ** 2) return;   // слишком часто
+      if (dx * dx + dy * dy + dz * dz < (0.35 * U * 0.01) ** 2) {
+        if (info) info.textContent = 'точка здесь уже стоит — сдвиньте курсор';
+        return;
+      }
     }
     if (!ptSnap) ptSnap = snapshot();
     const res = insertPointAt(h.faceIndex, h.p);
@@ -387,6 +392,17 @@ export function initSculpt(opts) {
     /* узел «лицевой», если его нормаль смотрит на камеру; для склеенной
        (canon) сетки это точнее, чем «принадлежит лицевой грани» */
     const vn = vertexNormals(topo, liveIndex, pos);
+    /* Нормаль под курсором: кисть правит ту поверхность, куда попал луч, и не
+       должна проходить сквозь тонкую стенку на её обратную сторону. */
+    let hx = 0, hy = 0, hz = 0;
+    if (center) {
+      const hv = nearestNode(center);
+      if (hv >= 0) {
+        const hl = Math.hypot(vn[hv * 3], vn[hv * 3 + 1], vn[hv * 3 + 2]) || 1;
+        hx = vn[hv * 3] / hl; hy = vn[hv * 3 + 1] / hl; hz = vn[hv * 3 + 2] / hl;
+      }
+    }
+    const hasHit = hx || hy || hz;
     for (let v = 0; v < vk; v++) {
       const dx = pos[v * 3] - cp.x, dy = pos[v * 3 + 1] - cp.y, dz = pos[v * 3 + 2] - cp.z;
       const nl = Math.hypot(vn[v * 3], vn[v * 3 + 1], vn[v * 3 + 2]);
@@ -395,23 +411,41 @@ export function initSculpt(opts) {
       const dl = Math.hypot(dx, dy, dz) || 1;
       /* наклон к камере: нормаль против направления на камеру */
       const back = nx * (dx / dl) + ny * (dy / dl) + nz * (dz / dl);
-      /* фронт у самой кромки силуэта (|back| мал) не трогаем — там узлы общие */
-      front[v] = back < -0.12 ? 1 : 0;
+      /* back = dot(нормаль, узел − камера): у поверхности, развёрнутой к камере,
+         он отрицательный, у обратной стороны — около +1. Берём не «строго на
+         камеру» (капот при взгляде почти по касательной даёт ≈ 0 и выпадал из
+         маски), а «нормаль не отвёрнута от камеры больше 69°»: этого хватает,
+         чтобы отсечь обратную сторону кузова и обратную стенку тонкой детали. */
+      /* «та же сторона»: отсекаем только узлы, чья нормаль смотрит почти
+         навстречу нормали под курсором (обратная сторона тонкой стенки).
+         -0.6, а не 0: на грубой сетке (куб) нормали соседних граней расходятся
+         на 70°, и более строгий порог отрезал бы лицевые узлы. */
+      const same = !hasHit || (nx * hx + ny * hy + nz * hz) > -0.6;
+      front[v] = (back < 0.35 && same) ? 1 : 0;
     }
   }
   /** Маска узлов, которые нельзя трогать в этом штрихе. */
-  let block = null;
+  let block = null;      // 1 — узел трогать нельзя (этим пользуются закраска и ластик)
+  let allow = null;      // 1 — можно (этим пользуются pushBall/imprintShape: у них «only»)
   function makeBlock() {
-    if (!frontOnly) { block = dead; return block; }
     const m = new Uint8Array(vk);
-    for (let v = 0; v < vk; v++) m[v] = (dead[v] || !front[v]) ? 1 : 0;
+    allow = new Uint8Array(vk);
+    for (let v = 0; v < vk; v++) {
+      const bad = dead[v] || (frontOnly && !front[v]) ? 1 : 0;
+      m[v] = bad;
+      allow[v] = bad ? 0 : 1;
+    }
     block = m;
     return m;
   }
 
-  /** Область, очищенная от нелицевых узлов, — считается на момент действия. */
+  /** Область, очищенная от нелицевых узлов. Считается один раз на закраску:
+      иначе после «Выдавить» нормали на бугре наклоняются и следующее действие
+      трогает уже меньше вершин, чем первое. */
+  let regionFront = null;
   function frontMaskedRegion() {
     if (!frontOnly) return reg;
+    if (regionFront && regionFront.length === vk) return regionFront;
     let cx = 0, cy = 0, cz = 0, n = 0;
     for (let v = 0; v < vk; v++) {
       if (!reg[v]) continue;
@@ -422,7 +456,10 @@ export function initSculpt(opts) {
     const m = new Uint8Array(vk);
     let k = 0;
     for (let v = 0; v < vk; v++) if (reg[v] && front[v]) { m[v] = 1; k++; }
-    return (k === n || !k) ? reg : m;
+    if (!k) return reg;
+    if (k === n) { regionFront = reg; return reg; }   // маска совпала с областью
+    regionFront = m;
+    return m;
   }
 
   /* ---------- сетка тонкими чёрными линиями ---------- */
@@ -563,7 +600,7 @@ export function initSculpt(opts) {
     }
     const fit = (dst, srcArr) => { dst.set(srcArr.subarray(0, Math.min(srcArr.length, dst.length))); dst.fill(0, Math.min(srcArr.length, dst.length)); };
     fit(pos, s.pos); fit(reg, s.reg); fit(dead, s.dead); fit(added, s.added);
-    regionN = s.n; delTotal = s.del;
+    regionN = s.n; delTotal = s.del; regionFront = null;
     nrm = null;
     paintMarks(); free = freeMask(topo, reg);
     updateAddedDots();
@@ -615,6 +652,15 @@ export function initSculpt(opts) {
     const p = mesh.worldToLocal(h.point.clone());
     return { p: [p.x, p.y, p.z], faceIndex: h.faceIndex };
   }
+  /** ближайший узел, но не дальше maxD — иначе клик в дырку цеплял бы узел
+      с другой стороны кузова */
+  function nearestNodeNear(p, skip, maxD) {
+    const v = nearestNode(p, skip);
+    if (v < 0) return -1;
+    const o = v * 3;
+    const d = Math.hypot(pos[o] - p[0], pos[o + 1] - p[1], pos[o + 2] - p[2]);
+    return d <= maxD ? v : -1;
+  }
   function nearestNode(p, skip) {
     let best = -1, bd = Infinity;
     for (let v = 0; v < vk; v++) {
@@ -627,6 +673,58 @@ export function initSculpt(opts) {
     return best;
   }
 
+  /* ---------- курсор кисти: кольцо на поверхности под мышью ----------
+     Без него размер кисти угадываешь на глаз: кольцо показывает и радиус, и
+     точку, куда попадёт инструмент. Живёт в локальных координатах меша, поэтому
+     видно и на скруглениях. Цвет — по инструменту. */
+  let cursor = null, cursorMat = null;
+  function ensureCursor() {
+    if (cursor) return cursor;
+    if (!mesh || typeof mesh.add !== 'function') return null;
+    if (!THREE.RingGeometry || !THREE.Mesh || !THREE.MeshBasicMaterial) return null;
+    cursorMat = new THREE.MeshBasicMaterial({
+      color: 0xffa63d, transparent: true, opacity: 0.9, side: THREE.DoubleSide,
+      depthTest: false, depthWrite: false
+    });
+    cursor = new THREE.Mesh(new THREE.RingGeometry(0.84, 1, 56), cursorMat);
+    cursor.renderOrder = 20;
+    cursor.frustumCulled = false;
+    cursor.visible = false;
+    mesh.add(cursor);                       // в системе координат кузова
+    return cursor;
+  }
+  const CURSOR_COLOR = { select: 0x4fd1c5, erase: 0xf25c5c, pen: 0xffd166, shape: 0xffa63d };
+  function hideCursor() { if (cursor) cursor.visible = false; }
+  function updateCursor(e) {
+    const c = ensureCursor();
+    if (!c) return;
+    if (!tool || tool === 'point' || tool === 'measure') { c.visible = false; return; }
+    const h = e ? hitFace(e.clientX, e.clientY) : null;
+    if (!h) { c.visible = false; return; }
+    const b = h.faceIndex * 3;
+    if (!(b >= 0) || b + 2 >= liveIndex.length) { c.visible = false; return; }
+    const i0 = liveIndex[b], i1 = liveIndex[b + 1], i2 = liveIndex[b + 2];
+    let n = triNormal(i0, i1, i2, pos);
+    const ln = Math.hypot(n[0], n[1], n[2]);
+    if (!ln) { c.visible = false; return; }
+    n = [n[0] / ln, n[1] / ln, n[2] / ln];
+    const R = brushR();
+    const p = h.p;
+    const off = R * 0.02 + 0.01 * U;         // чуть над поверхностью, без мерцания
+    if (c.position) c.position.set(p[0] + n[0] * off, p[1] + n[1] * off, p[2] + n[2] * off);
+    if (c.scale) { if (c.scale.setScalar) c.scale.setScalar(R); else c.scale.set(R, R, R); }
+    if (c.quaternion && c.quaternion.set) {
+      /* поворот оси +z кольца на нормаль: q = [z × n, 1 + z·n] */
+      const cx = -n[1], cy = n[0], cz = 0, cw = 1 + n[2];
+      const cl = Math.hypot(cx, cy, cz, cw) || 1;
+      c.quaternion.set(cx / cl, cy / cl, cz / cl, cw / cl);
+    }
+    if (cursorMat && cursorMat.color && cursorMat.color.setHex) {
+      cursorMat.color.setHex(CURSOR_COLOR[tool] || 0xffa63d);
+    }
+    c.visible = true;
+  }
+
   /* ---------- 1. выбор участка ---------- */
   function paintAt(c) {
     const skip = block || dead;           // что нельзя трогать в этом штрихе
@@ -635,7 +733,7 @@ export function initSculpt(opts) {
       const v = nearestNode(c, skip);
       if (v >= 0 && !reg[v] && !skip[v]) { reg[v] = 1; added = 1; }
     }
-    if (added) { regionN += added; paintMarks(); }
+    if (added) { regionN += added; regionFront = null; paintMarks(); }
     return added;
   }
   function stamp(clientX, clientY) {
@@ -660,7 +758,7 @@ export function initSculpt(opts) {
       const dx = pos[o] - c[0], dy = pos[o + 1] - c[1], dz = pos[o + 2] - c[2];
       if (dx * dx + dy * dy + dz * dz <= r2) mark(v);
     }
-    if (!n) { const v = nearestNode(c, dead); if (v >= 0) mark(v); }
+    if (!n) { const v = nearestNodeNear(c, dead, brushR() * 1.6); if (v >= 0) mark(v); }
     return n;
   }
   function eraseStamp(clientX, clientY) {
@@ -674,11 +772,29 @@ export function initSculpt(opts) {
 
   /* ---------- 3. перо ---------- */
   let penMoved = 0;
+  let penBase = null;       // положения на начало штриха пера
+  /* Валик должен быть высотой «Глубина», а не «глубина × число событий мыши»:
+     под пером узлы обрабатываются на каждом движении и копили бы 5–6 глубин.
+     Поэтому меряем сдвиг от начала штриха и обрезаем его на «Глубине». */
+  function clampPenStroke() {
+    if (!penBase) return;
+    const lim = depthD();
+    for (let v = 0; v < vk; v++) {
+      const o = v * 3;
+      const dx = pos[o] - penBase[o], dy = pos[o + 1] - penBase[o + 1], dz = pos[o + 2] - penBase[o + 2];
+      const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (l <= lim) continue;
+      const k = lim / l;
+      pos[o] = penBase[o] + dx * k;
+      pos[o + 1] = penBase[o + 1] + dy * k;
+      pos[o + 2] = penBase[o + 2] + dz * k;
+    }
+  }
   function penAt(c, sign) {
     if (++penTicks % 8 === 0) nrm = null;
-    const res = pushBall(topo, pos, c, brushR(), sign * depthD(), getNormals(), block || dead);
+    const res = pushBall(topo, pos, c, brushR(), sign * depthD(), getNormals(), allow || block || dead);
     if (!res.moved) {                     // кисть мельче сетки — двигаем одну точку
-      const v = nearestNode(c, dead);
+      const v = nearestNodeNear(c, allow ? null : block, brushR() * 1.6);
       if (v >= 0) {
         const o = v * 3, n = getNormals();
         pos[o] += n[o] * sign * depthD();
@@ -694,6 +810,8 @@ export function initSculpt(opts) {
     const c = hitPoint(clientX, clientY);
     if (!c) return 0;
     const m = penAt(c, sign) + (sym ? penAt([c[0], -c[1], c[2]], sign) : 0);
+    clampPenStroke();
+    nrm = null;                            // нормали после обрезки другие
     return m;
   }
 
@@ -843,7 +961,7 @@ export function initSculpt(opts) {
       size: { r: R, h: Math.max(R * 0.8, depthD()), a: R * 0.8, b: R * 0.8 },
       band: Math.max(R * 0.12, spacing * 0.5)      // узкая кромка — штамп жёсткий
     };
-    const res = imprintShape(topo, pos, shape, sign * depthD(), n, block || dead);
+    const res = imprintShape(topo, pos, shape, sign * depthD(), n, allow);
     return { ...res, refined };
   }
   function shapeStamp(clientX, clientY, sign) {
@@ -892,7 +1010,7 @@ export function initSculpt(opts) {
     clearDots();
     let regNow = 0, delNow = 0;
     for (let v = 0; v < vk; v++) { if (reg[v]) regNow++; if (dead[v]) delNow++; }
-    regionN = regNow; delTotal = delNow;
+    regionN = regNow; delTotal = delNow; regionFront = null;
     nrm = null;
     paintMarks();
     flush();
@@ -922,9 +1040,10 @@ export function initSculpt(opts) {
 
   function smoothOnce() {
     if (!needRegion()) return;
-    const steps = Math.max(20, Math.round(amount / 100 * MAXSTEPS));
+    const steps = Math.max(4, Math.round(amount / 100 * MAXSTEPS));
     pushHist();
     const before = sym ? Float32Array.from(pos) : null;
+    const before0 = Float32Array.from(pos);
     free = freeMask(topo, reg);
     const rg = frontMaskedRegion();
     const w = boundaryFalloff(topo, rg, 4);
@@ -938,8 +1057,18 @@ export function initSculpt(opts) {
     const mirrored = symAfter(before);
     nrm = null;
     flush();
-    if (mirrored && info) info.textContent = `сглажено · зеркально повторено на ${mirrored} вершинах`;
-    else syncInfo();
+    let dmax = 0, moved = 0;
+    for (let v = 0; v < vk; v++) {
+      if (!rg[v]) continue;
+      const o = v * 3;
+      const d = Math.hypot(pos[o] - before0[o], pos[o + 1] - before0[o + 1], pos[o + 2] - before0[o + 2]);
+      if (d > 1e-9) moved++;
+      if (d > dmax) dmax = d;
+    }
+    if (info) {
+      info.textContent = `сглажено: ${moved} вершин из ${regionN}, макс. сдвиг ${(dmax / U).toFixed(3)} мм` +
+        (mirrored ? ` · зеркально повторено на ${mirrored}` : '');
+    }
   }
 
   function flattenOnce() {
@@ -1022,7 +1151,8 @@ export function initSculpt(opts) {
       'точками и уходят по отпусканию кнопки, а дырка зашивается треугольниками по ' +
       'своей кромке — поверхность сама соединится с ближайшими оставшимися точками.',
     pen: 'Левой кнопкой <b>ведите по поверхности</b>: под пером остаётся валик ' +
-      'высотой «Глубина» и шириной «Кисть». С зажатым <b>Shift</b> — канавка (внутрь).',
+      'высотой «Глубина» и шириной «Кисть» — высота не копится за штрих, сколько ' +
+      'бы вы ни водили мышью. С зажатым <b>Shift</b> — канавка (внутрь).',
     shape: 'Левой кнопкой <b>поставьте фигуру</b> на кузов (● сфера / ▮ цилиндр / ' +
       '■ куб, размер — «Кисть», глубина — «Глубина»). В пятне касания сетка сначала ' +
       'сгущается — добавляются точки по размеру кисти, — а потом эти точки ' +
@@ -1060,7 +1190,7 @@ export function initSculpt(opts) {
     } else if (regionN) {
       const pct = (100 * regionN / vk).toFixed(0);
       info.textContent = `выбрано ${regionN} вершин (${pct} %), ` +
-        `за нажатие ${Math.max(20, Math.round(amount / 100 * MAXSTEPS))} итераций`;
+        `за нажатие ${Math.max(4, Math.round(amount / 100 * MAXSTEPS))} итераций`;
     } else {
       info.textContent = 'область не выбрана — закрасьте участок кистью';
     }
@@ -1099,6 +1229,7 @@ export function initSculpt(opts) {
   }
 
   function setTool(t) {
+    if (t !== tool) hideCursor();
     tool = (tool === t) ? null : t;
     const tag = (btn, v, onText, offText) => {
       if (!btn) return;
@@ -1113,7 +1244,8 @@ export function initSculpt(opts) {
     tag(btnPoint, tool === 'point', '■ Закончить добавление', '✚ Точка');
     if (hint) hint.innerHTML = HINTS[tool] || HINTS.select;
     if (tool !== 'measure') { measPts = []; measLine.visible = false; }
-    block = null;                 // маска лицевых граней считается заново на каждом штрихе
+    if (!tool) hideCursor();
+    block = null; allow = null;   // маска лицевых граней считается заново на каждом штрихе
     if (tool !== 'point') { ptSnap = null; lastPt = null; }
     syncRows();
     clearDots();
@@ -1126,6 +1258,7 @@ export function initSculpt(opts) {
   cvs.addEventListener('contextmenu', e => { if (tool) e.preventDefault(); });
   cvs.addEventListener('pointerdown', e => {
     if (!tool || e.button !== 0) return;
+    updateCursor(e);
     if (tool === 'measure') { addMeasurePoint(e.clientX, e.clientY); return; }
     painting = true;
     invert = e.shiftKey;
@@ -1140,7 +1273,7 @@ export function initSculpt(opts) {
       makeBlock();
       eraseStamp(e.clientX, e.clientY);
     } else if (tool === 'pen') {
-      pushHist(); nrm = null; penMoved = 0;
+      pushHist(); nrm = null; penMoved = 0; penBase = Float32Array.from(pos);
       const c0 = hitPoint(e.clientX, e.clientY);
       if (c0) computeFront(c0);
       makeBlock();
@@ -1168,6 +1301,7 @@ export function initSculpt(opts) {
     }
   });
   cvs.addEventListener('pointermove', e => {
+    updateCursor(e);                         // кольцо кисти видно до нажатия
     if (!painting || !tool) return;
     if (tool === 'point') addPointsAt(e.clientX, e.clientY);
     else if (tool === 'erase') eraseStamp(e.clientX, e.clientY);
@@ -1185,7 +1319,9 @@ export function initSculpt(opts) {
       applyErase(n);
     } else if (tool === 'pen') {
       nrm = null;
-      if (info) info.textContent = `перо: сдвинуто ${penMoved} вершин на ${depthMM.toFixed(2)} мм`;
+      penBase = null;
+      if (info) info.textContent = `перо: сдвинуто ${penMoved} вершин, высота до ${depthMM.toFixed(2)} мм` +
+        (invert ? ' (канавка)' : '');
     } else if (tool === 'point') {
       ensureTopo(); nrm = null;
       if (ptSnap) { hist.push(ptSnap); if (hist.length > 15) hist.shift(); redo.length = 0; ptSnap = null; }
@@ -1195,9 +1331,18 @@ export function initSculpt(opts) {
       else syncInfo();
     }
   };
-  cvs.addEventListener('pointerup', stop);
+  cvs.addEventListener('pointerup', (e) => {
+    const nothing = tool === 'erase' && painting && !strokeDel;
+    stop(e);
+    if (nothing) syncInfo('здесь нечего стирать — под кистью нет точек');
+  });
   cvs.addEventListener('pointercancel', stop);
-  cvs.addEventListener('pointerleave', stop);
+  cvs.addEventListener('pointerleave', (e) => {
+    /* при захвате указателя уход за холст не должен обрывать штрих */
+    if (cvs.hasPointerCapture && cvs.hasPointerCapture(e.pointerId)) return;
+    hideCursor();
+    stop(e);
+  });
 
   if (btnMode) btnMode.addEventListener('click', () => setTool('select'));
   if (btnDel) btnDel.addEventListener('click', () => setTool('erase'));
@@ -1214,7 +1359,7 @@ export function initSculpt(opts) {
       frontOnly = chkFront.checked;
       chkFront.classList.toggle('on', frontOnly);
       chkFront.textContent = frontOnly ? '◐ Только видимые грани' : '◐ Грани: все';
-      block = null; front.fill(frontOnly ? 0 : 1);
+      block = null; allow = null; regionFront = null; front.fill(frontOnly ? 0 : 1);
       syncInfo(frontOnly
         ? 'правки касаются только граней, видимых с камеры'
         : 'ограничение снято: кисть проходит кузов насквозь');
@@ -1331,9 +1476,9 @@ export function initSculpt(opts) {
     }
     pos0.fill(0); pos0.set(posInit.subarray(0, Math.min(posInit.length, pos0.length)));
     pos.fill(0); pos.set(posInit.subarray(0, Math.min(posInit.length, pos.length)));
-    reg.fill(0); regionN = 0;
+    reg.fill(0); regionN = 0; regionFront = null;
     dead.fill(0); delTotal = 0;
-    added.fill(0); addedTotal = 0; front.fill(1); block = null;
+    added.fill(0); addedTotal = 0; front.fill(1); block = null; allow = null;
     setIndex(origIndex.slice());
     nrm = null;
     paintMarks(); updateAddedDots(); flush(); syncInfo();

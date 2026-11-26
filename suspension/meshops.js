@@ -539,7 +539,9 @@ export function pushBall(topo, pos, center, r, amount, normals, only) {
   let moved = 0, maxd = 0;
   const r2 = r * r;
   for (let v = 0; v < vk; v++) {
-    if (only && !only[v]) continue;
+    /* узлы, добавленные сгущением уже после снятия маски, в неё не попали —
+       для них считаем «можно» (они лежат внутри пятна кисти) */
+    if (only && v < only.length && !only[v]) continue;
     const o = v * 3;
     const dx = pos[o] - center[0], dy = pos[o + 1] - center[1], dz = pos[o + 2] - center[2];
     const d2 = dx * dx + dy * dy + dz * dz;
@@ -562,11 +564,21 @@ export function pushBall(topo, pos, center, r, amount, normals, only) {
 export function offsetRegion(topo, pos, reg, amount, normals, soft = 4) {
   const { vk } = topo;
   const w = boundaryFalloff(topo, reg, soft);
+  /* Нормируем затухание так, чтобы самая глубокая точка области уходила ровно
+     на amount: иначе на небольшой закраске кромка съедает половину глубины и
+     «Выдавить на 0.8 мм» даёт 0.4. Если область — узкая полоса в одно кольцо
+     (затухание везде 0), двигаем её целиком. */
+  let wmax = 0;
+  for (let v = 0; v < vk; v++) if (reg[v] && w[v] > wmax) wmax = w[v];
+  const k = wmax > 1e-6 ? 1 / wmax : 1;
+  const wAll = wmax <= 1e-6 ? 1 : 0;
   let moved = 0, maxd = 0;
   for (let v = 0; v < vk; v++) {
-    if (!reg[v] || w[v] <= 0) continue;
+    if (!reg[v]) continue;
+    const wv = wAll ? 1 : w[v] * k;
+    if (wv <= 0) continue;
     const o = v * 3;
-    const s = amount * w[v];
+    const s = amount * wv;
     pos[o] += normals[o] * s;
     pos[o + 1] += normals[o + 1] * s;
     pos[o + 2] += normals[o + 2] * s;
@@ -583,7 +595,7 @@ export function offsetRegion(topo, pos, reg, amount, normals, soft = 4) {
  * глубине погружения — поверхность принимает форму фигуры, оставаясь целой.
  * amount > 0 — вдавить, < 0 — вытянуть (фигура «вытаскивает» купол).
  */
-export function imprintShape(topo, pos, shape, amount, normals) {
+export function imprintShape(topo, pos, shape, amount, normals, only = null) {
   const { vk } = topo;
   const c = shape.center;
   // локальная ось фигуры (вдоль нормали поверхности), и два вектора в плоскости
@@ -598,6 +610,7 @@ export function imprintShape(topo, pos, shape, amount, normals) {
   const A = shape.size.a || R, B = shape.size.b || R;
   let moved = 0, maxd = 0;
   for (let v = 0; v < vk; v++) {
+    if (only && v < only.length && !only[v]) continue;   // 0 — не трогаем (обратная сторона)
     const o = v * 3;
     const px = pos[o] - c[0], py = pos[o + 1] - c[1], pz = pos[o + 2] - c[2];
     const u = px * ux + py * uy + pz * uz;
