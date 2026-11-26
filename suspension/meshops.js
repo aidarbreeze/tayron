@@ -598,6 +598,36 @@ export function offsetRegion(topo, pos, reg, amount, normals, soft = 4) {
 export function imprintShape(topo, pos, shape, amount, normals, only = null) {
   const { vk } = topo;
   const c = shape.center;
+
+  /* Капсула вдоль отрезка — это борозда: ось задана вектором в плоскости
+     поверхности, длина — отрезком, ширина — радиусом. Глубина одинаковая по
+     всей длине (плоское дно), подъём к кромке — в узкой полосе band, поэтому
+     стенки желоба получаются резкими и ровными, а не «размазанными». */
+  if (shape.kind === 'capsule') {
+    const ax = shape.axis, L2 = shape.len / 2;
+    const R = shape.size.r;
+    const band = Math.max(shape.band > 0 ? shape.band : R * 0.4, 1e-6);
+    let moved = 0, maxd = 0;
+    for (let v = 0; v < vk; v++) {
+      if (only && v < only.length && !only[v]) continue;
+      const o = v * 3;
+      const px = pos[o] - c[0], py = pos[o + 1] - c[1], pz = pos[o + 2] - c[2];
+      let t = px * ax[0] + py * ax[1] + pz * ax[2];
+      if (t > L2) t = L2; else if (t < -L2) t = -L2;
+      const qx = px - ax[0] * t, qy = py - ax[1] * t, qz = pz - ax[2] * t;
+      const d = Math.hypot(qx, qy, qz);
+      if (d >= R) continue;
+      const inside = R - d;
+      const s = -amount * (inside >= band ? 1 : inside / band);
+      if (s === 0) continue;
+      pos[o] += normals[o] * s;
+      pos[o + 1] += normals[o + 1] * s;
+      pos[o + 2] += normals[o + 2] * s;
+      moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
+    }
+    return { moved, maxd };
+  }
+
   // локальная ось фигуры (вдоль нормали поверхности), и два вектора в плоскости
   let nx = shape.n[0], ny = shape.n[1], nz = shape.n[2];
   const ln = Math.hypot(nx, ny, nz) || 1; nx /= ln; ny /= ln; nz /= ln;
