@@ -1148,10 +1148,8 @@ export function initSculpt(opts) {
      оставшимся вершинам — сетка остаётся замкнутой. */
   function mirrorCopy() {
     if (!regionN) { syncInfo('сначала выделите рамкой часть одной стороны кузова'); return 0; }
-    const vn = getNormals();
     let sumY = 0, n = 0;
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    let snx = 0, sny = 0, snz = 0;
     for (let v = 0; v < vk; v++) {
       if (!reg[v] || dead[v]) continue;
       const o = v * 3;
@@ -1160,32 +1158,74 @@ export function initSculpt(opts) {
       if (pos[o] > maxX) maxX = pos[o];
       if (pos[o + 2] < minZ) minZ = pos[o + 2];
       if (pos[o + 2] > maxZ) maxZ = pos[o + 2];
-      snx += vn[o]; sny += vn[o + 1]; snz += vn[o + 2];
     }
     if (!n) { syncInfo('в рамке нет живых вершин'); return 0; }
     const side = sumY / n > 0 ? 1 : -1;
-    const snl = Math.hypot(snx, sny, snz) || 1;
-    /* наружная нормаль копии: у выделенной стороны она зеркальна */
-    const sx2 = snx / snl, sy2 = -sny / snl, sz2 = snz / snl;
 
-    /* 1. что копируем — грани выделения, у которых все три узла в области */
+    /* 1. что копируем — все грани этой стороны, попавшие в рамку (видимые и
+          скрытые: копия должна закрыть рамку целиком, а не только то, что
+          видно с одной точки). Ближе 1 ед. к плоскости симметрии не берём —
+          там зеркало накладывается само на себя. */
     const patch = [];
     const inPatch = new Uint8Array(count);
+    const inArea = (nd) => {
+      const o = nd * 3;
+      if (((pos[o + 1] > 0) ? 1 : -1) !== side) return false;
+      if (Math.abs(pos[o + 1]) < 1) return false;          // сама плоскость симметрии
+      if (!regFromRect) return !!reg[nd];
+      return inRectScreen(pos[o], pos[o + 1], pos[o + 2]);
+    };
     for (let f = 0; f < liveIndex.length; f += 3) {
       const a = liveIndex[f], b = liveIndex[f + 1], c = liveIndex[f + 2];
       const na = canon[a], nb = canon[b], nc = canon[c];
-      if (!reg[na] || !reg[nb] || !reg[nc]) continue;
       if (dead[na] || dead[nb] || dead[nc]) continue;
-      if (((pos[na * 3 + 1] > 0) ? 1 : -1) !== side) continue;
-      if (((pos[nb * 3 + 1] > 0) ? 1 : -1) !== side) continue;
-      if (((pos[nc * 3 + 1] > 0) ? 1 : -1) !== side) continue;
+      if (!inArea(na) || !inArea(nb) || !inArea(nc)) continue;
       patch.push(a, b, c);
       inPatch[a] = 1; inPatch[b] = 1; inPatch[c] = 1;
     }
     if (!patch.length) { syncInfo('в выделении нет целых граней — растяните рамку'); return 0; }
 
-    /* 2. что вырезаем — вершины другой стороны в той же рамке, на той же поверхности */
+    /* 2. что вырезаем — ровно «след» копии на экране: силуэт выделенного участка
+          проецируется в сетку пикселей, и вершина другой стороны вырезается,
+          если её зеркало попадает в этот силуэт. Тогда кромка дыры совпадает с
+          кромкой копии, и щель на стыке выходит узкой. */
     const pad = Math.max(brushR(), 12);
+    const CELL = 2;                       // размер клетки силуэта, px
+    let sMinX = Infinity, sMaxX = -Infinity, sMinY = Infinity, sMaxY = -Infinity;
+    const sp = [0, 0];
+    const patchScreen = new Map();        // «клетка» → 1
+    const cellOf = (x, y) => Math.floor(x / CELL) + ':' + Math.floor(y / CELL);
+    for (let i = 0; i < patch.length; i += 3) {
+      const A = patch[i] * 3, B = patch[i + 1] * 3, C = patch[i + 2] * 3;
+      const pa = screenOfPoint(src[A], -src[A + 1], src[A + 2], [0, 0]);
+      const ax = pa[0], ay = pa[1];
+      const pb = screenOfPoint(src[B], -src[B + 1], src[B + 2], [0, 0]);
+      const bx = pb[0], by = pb[1];
+      const pc = screenOfPoint(src[C], -src[C + 1], src[C + 2], [0, 0]);
+      const cx = pc[0], cy = pc[1];
+      if (!isFinite(ax + ay + bx + by + cx + cy)) continue;
+      if (ax < sMinX) sMinX = ax; if (ax > sMaxX) sMaxX = ax;
+      if (bx < sMinX) sMinX = bx; if (bx > sMaxX) sMaxX = bx;
+      if (cx < sMinX) sMinX = cx; if (cx > sMaxX) sMaxX = cx;
+      if (ay < sMinY) sMinY = ay; if (ay > sMaxY) sMaxY = ay;
+      if (by < sMinY) sMinY = by; if (by > sMaxY) sMaxY = by;
+      if (cy < sMinY) sMinY = cy; if (cy > sMaxY) sMaxY = cy;
+      const area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+      if (Math.abs(area) < 1e-9) { patchScreen.set(cellOf(ax, ay), 1); continue; }
+      const inv = 1 / area;
+      const gx0 = Math.floor(Math.min(ax, bx, cx) / CELL) - 1, gx1 = Math.ceil(Math.max(ax, bx, cx) / CELL) + 1;
+      const gy0 = Math.floor(Math.min(ay, by, cy) / CELL) - 1, gy1 = Math.ceil(Math.max(ay, by, cy) / CELL) + 1;
+      for (let gy = gy0; gy <= gy1; gy++) {
+        for (let gx = gx0; gx <= gx1; gx++) {
+          const px = gx * CELL + CELL / 2, py = gy * CELL + CELL / 2;
+          const w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) * inv;
+          const w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) * inv;
+          const w2 = 1 - w0 - w1;
+          if (w0 < -0.02 || w1 < -0.02 || w2 < -0.02) continue;
+          patchScreen.set(gx + ':' + gy, 1);
+        }
+      }
+    }
     const del = new Uint8Array(vk);
     let delN = 0;
     for (let v = 0; v < vk; v++) {
@@ -1194,9 +1234,10 @@ export function initSculpt(opts) {
       if (((pos[o + 1] > 0) ? 1 : -1) === side) continue;
       if (pos[o] < minX - pad || pos[o] > maxX + pad) continue;
       if (pos[o + 2] < minZ - pad || pos[o + 2] > maxZ + pad) continue;
-      if (regFromRect && !inRectScreen(pos[o], -pos[o + 1], pos[o + 2])) continue;
-      const l = Math.hypot(vn[o], vn[o + 1], vn[o + 2]) || 1;
-      if ((vn[o] * sx2 + vn[o + 1] * sy2 + vn[o + 2] * sz2) / l < 0.4) continue;
+      screenOfPoint(pos[o], pos[o + 1], pos[o + 2], sp);
+      if (!patchScreen.has(cellOf(sp[0], sp[1]))) continue;
+      /* нормали не фильтруем: под копией должно исчезнуть ВСЁ, иначе копия
+         ложится поверх старой поверхности и на стыке остаётся сетка заплаток */
       del[v] = 1; delN++;
     }
     if (!delN) { syncInfo('на другой стороне в этой рамке нечего заменять — сдвиньте рамку'); return 0; }
@@ -1264,6 +1305,16 @@ export function initSculpt(opts) {
       const k = key(pos[o], pos[o + 1], pos[o + 2]);
       const a = grid.get(k); if (a) a.push(v); else grid.set(k, [v]);
     }
+    /* медиана длины ребра — насколько близко должна лежать пара, чтобы её
+       можно было сварить: далёкую сварку не делаем, иначе копия растягивается */
+    const es = [];
+    for (let f = 0; f < liveIndex.length; f += 3) {
+      const a = canon[liveIndex[f]] * 3, b = canon[liveIndex[f + 1]] * 3;
+      es.push(Math.hypot(pos[a] - pos[b], pos[a + 1] - pos[b + 1], pos[a + 2] - pos[b + 2]));
+    }
+    es.sort((a, b) => a - b);
+    const edgeMed = es.length ? es[es.length >> 1] : 2;
+    const weldMax = Math.max(edgeMed * 1.5, 1);
     const pairs = [];
     for (const v of pBound) {
       const i = newOf[v];
@@ -1281,7 +1332,7 @@ export function initSculpt(opts) {
           if (d < bd) { bd = d; bv = h; }
         }
       }
-      if (bv >= 0) pairs.push([bd, i, bv]);
+      if (bv >= 0 && bd <= weldMax * weldMax) pairs.push([bd, i, bv]);
     }
     pairs.sort((a, b) => a[0] - b[0]);
     const weldOf = new Map();       // новый индекс → вершина оставшейся части
