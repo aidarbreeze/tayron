@@ -48,7 +48,14 @@
   input[type=range]::-moz-range-thumb{width:13px;height:13px;border:0;border-radius:50%;background:var(--acc)}
 
   /* ---------- телеметрия ---------- */
-  #tele{right:20px;top:18px;width:296px;padding:15px 16px}
+  #tele{right:20px;top:18px;width:296px;padding:0;overflow:hidden}
+  #tele summary{padding:13px 16px;cursor:pointer;font-size:11.5px;color:var(--txt);list-style:none;
+    display:flex;justify-content:space-between;align-items:center;user-select:none;gap:8px}
+  #tele summary::-webkit-details-marker{display:none}
+  #tele summary::after{content:'＋';color:var(--acc);font-size:13px}
+  #tele[open] summary::after{content:'−'}
+  #tele .body{padding:0 16px 15px}
+  #tele summary .dots{flex:1;border-bottom:1px dotted rgba(255,255,255,.12);height:1px;margin:0 2px}
   #tele h2{margin:0 0 11px;font-size:10.5px;letter-spacing:1.3px;text-transform:uppercase;color:var(--dim);font-weight:600}
   .big{display:flex;justify-content:space-between;align-items:flex-end;padding:7px 0;border-bottom:1px dashed rgba(255,255,255,.07)}
   .big:last-of-type{border:0}
@@ -167,28 +174,32 @@
     <button class="btn" id="spin">▶ Крутить колёса</button>
     <button class="btn" id="xray">Рентген</button>
     <button class="btn" id="wire">Сетка</button>
-    <button class="btn" id="reset">Сброс камеры</button>
+    <button class="btn" id="sec">Сечение</button>
+    <button class="btn wide" id="reset">Сброс камеры</button>
+  </div>
+  <div class="row hd" id="secrow">
+    <span class="tag" style="width:auto">Разрез</span>
+    <input type="range" id="sec-pos" min="0" max="100" step="1" value="35">
+    <span class="val" id="secv">35%</span>
   </div>
 
-  <h2>Сглаживание кузова</h2>
+  <h2>Редактор кузова</h2>
   <div class="presets">
     <button class="btn" id="sc-mode">✎ Участок</button>
     <button class="btn" id="sc-del">⌫ Ластик</button>
     <button class="btn" id="sc-pen">✏ Рисовать</button>
     <button class="btn" id="sc-shape">◆ Фигура</button>
+    <button class="btn wide" id="sc-measure">📏 Измерить</button>
   </div>
   <p class="hint hd" id="sc-hint">Левой кнопкой <b>закрасьте</b> участок на кузове,
-    правой — вращать камеру, колесом — приблизить. Затем жмите <b>«Сгладить»</b>
-    столько раз, сколько нужно: каждое нажатие добавляет свой шаг, «Отменить»
-    откатывает последнее. Двигаются только вершины — сетка остаётся замкнутой,
-    ничего не режется; фары и эмблему просто не закрашивайте.
-    <b>Ластик</b> подсвечивает удаляемые вершины красными точками: они уходят по
-    отпусканию кнопки, а дырка зашивается треугольниками по своей кромке.
-    <b>«Рисовать»</b> оставляет валик вдоль штриха, <b>«Фигура»</b> вдавливает в
-    кузов сферу, цилиндр или куб, <b>«Выдавить» / «Вдавить»</b> поднимают или
-    опускают закрашенную область. Кнопка <b>«Сетка»</b> показывает триангуляцию
-    тонкими чёрными линиями.</p>
-  <div class="row sc-row hd">
+    правой — вращать камеру, колесом — приблизить. Дальше кнопки: <b>«Сгладить»</b>
+    (каждое нажатие добавляет шаг), <b>«Выровнять»</b> (область садится в
+    плоскость), <b>«Обострить»</b>, <b>«Выдавить» / «Вдавить»</b>.
+    <b>Ластик</b> подсвечивает удаляемые вершины красными точками и зашивает
+    дырку, <b>«Рисовать»</b> оставляет валик вдоль штриха, <b>«Фигура»</b>
+    вдавливает в кузов сферу, цилиндр или куб, <b>«Измерить»</b> мерит расстояние.
+    Сетка и сечение — в кнопках вида выше.</p>
+  <div class="row sc-row hd" id="sc-brushrow">
     <span class="tag" style="width:auto">Кисть</span>
     <input type="range" id="sc-brush" min="0.1" max="20" step="0.1" value="0.5">
     <span class="val" id="sc-brushv">0.5 мм</span>
@@ -208,20 +219,30 @@
     <button class="btn" id="sc-fig-cylinder">▮ Цилиндр</button>
     <button class="btn" id="sc-fig-box">■ Куб</button>
   </div>
-  <div class="presets sc-row hd" id="sc-extrude-row" style="grid-template-columns:1fr 1fr 1fr">
+  <div class="presets sc-row hd" id="sc-actions" style="grid-template-columns:1fr 1fr 1fr">
     <button class="btn" id="sc-go">≡ Сгладить</button>
+    <button class="btn" id="sc-flat">▭ Выровнять</button>
+    <button class="btn" id="sc-sharp">✦ Обострить</button>
+  </div>
+  <div class="presets sc-row hd" id="sc-extrude-row">
     <button class="btn" id="sc-out">⬆ Выдавить</button>
     <button class="btn" id="sc-in">⬇ Вдавить</button>
   </div>
-  <div class="presets sc-row hd">
+  <div class="presets" style="margin-top:8px">
+    <button class="btn" id="sc-sym">⇄ Симметрия</button>
+    <button class="btn" id="sc-check">✓ Проверка</button>
     <button class="btn" id="sc-undo">↶ Отменить</button>
+    <button class="btn" id="sc-redo">↷ Вернуть</button>
     <button class="btn" id="sc-clear">Сбросить</button>
-    <button class="btn wide" id="sc-save">⬇ Скачать 3MF</button>
+    <button class="btn" id="sc-save">⬇ 3MF</button>
+    <button class="btn wide" id="sc-stl">⬇ STL</button>
   </div>
   <p id="sc-info">область не выбрана — закрасьте участок кистью</p>
 </div>
 
-<div class="panel" id="tele">
+<details class="panel" id="tele">
+  <summary>Проверка работы модели<span class="dots"></span></summary>
+  <div class="body">
   <h2>Положение кузова (от покоя)</h2>
   <div class="big"><span class="k">Крен</span><span class="v" id="roll">0.0<small>°</small></span></div>
   <div class="big"><span class="k">Тангаж</span><span class="v" id="pitch">0.0<small>°</small></span></div>
@@ -232,7 +253,8 @@
     <span>сжатие ←</span><span>ход 1.4 мм</span><span>→ отбой</span>
   </div>
   <div id="warn">Пробой: S-лента легла на отбойник в канале кузова. Дальше кузов не проседает.</div>
-</div>
+  </div>
+</details>
 
 <div class="panel" id="hint">
   <span><b>Тяните</b> — вращение</span>

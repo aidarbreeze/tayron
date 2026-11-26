@@ -623,6 +623,213 @@ export function imprintShape(topo, pos, shape, amount, normals) {
   return { moved, maxd };
 }
 
+/**
+ * Выровнять закрашенную область в плоскость.
+ * Плоскость — по самой области: центроид + средняя нормаль граней, целиком
+ * лежащих в области (у решётки это даёт «панель» нужного наклона).
+ * amount 0…1 — насколько вытянуть (1 = точно в плоскость), у кромки плавный вход.
+ */
+export function flattenRegion(topo, pos, reg, index, amount = 1, soft = 3) {
+  const { vk, canon } = topo;
+  let cx = 0, cy = 0, cz = 0, cnt = 0;
+  for (let v = 0; v < vk; v++) {
+    if (!reg[v]) continue;
+    cx += pos[v * 3]; cy += pos[v * 3 + 1]; cz += pos[v * 3 + 2]; cnt++;
+  }
+  if (!cnt) return { moved: 0, maxd: 0, normal: null };
+  cx /= cnt; cy /= cnt; cz /= cnt;
+
+  // нормаль — по площади граней, у которых все три узла в области
+  let nx = 0, ny = 0, nz = 0;
+  for (let i = 0; i < index.length; i += 3) {
+    const a = canon[index[i]], b = canon[index[i + 1]], c = canon[index[i + 2]];
+    if (!reg[a] || !reg[b] || !reg[c]) continue;
+    const ao = a * 3, bo = b * 3, co = c * 3;
+    const e1x = pos[bo] - pos[ao], e1y = pos[bo + 1] - pos[ao + 1], e1z = pos[bo + 2] - pos[ao + 2];
+    const e2x = pos[co] - pos[ao], e2y = pos[co + 1] - pos[ao + 1], e2z = pos[co + 2] - pos[ao + 2];
+    nx += e1y * e2z - e1z * e2y;
+    ny += e1z * e2x - e1x * e2z;
+    nz += e1x * e2y - e1y * e2x;
+  }
+  const ln = Math.hypot(nx, ny, nz);
+  if (ln < 1e-12) {                       // область слишком изрезана — по нормалям узлов
+    const vn = vertexNormals(topo, index, pos);
+    for (let v = 0; v < vk; v++) {
+      if (!reg[v]) continue;
+      nx += vn[v * 3]; ny += vn[v * 3 + 1]; nz += vn[v * 3 + 2];
+    }
+    const l2 = Math.hypot(nx, ny, nz);
+    if (l2 < 1e-12) return { moved: 0, maxd: 0, normal: null };
+    nx /= l2; ny /= l2; nz /= l2;
+  } else { nx /= ln; ny /= ln; nz /= ln; }
+
+  const w = boundaryFalloff(topo, reg, soft);
+  let moved = 0, maxd = 0;
+  for (let v = 0; v < vk; v++) {
+    if (!reg[v] || w[v] <= 0) continue;
+    const o = v * 3;
+    const d = (pos[o] - cx) * nx + (pos[o + 1] - cy) * ny + (pos[o + 2] - cz) * nz;
+    const s = -d * amount * w[v];
+    if (s === 0) continue;
+    pos[o] += nx * s; pos[o + 1] += ny * s; pos[o + 2] += nz * s;
+    moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
+  }
+  return { moved, maxd, normal: [nx, ny, nz] };
+}
+
+/**
+ * Обострение (обратное сглаживанию): узел уходит от среднего своих соседей —
+ * рельеф подчёркивается, края становятся резче. Несколько итераций подряд.
+ */
+export function sharpenRegion(topo, pos, reg, index, k = 0.5, iters = 3, soft = 3) {
+  const { vk, off, nbr } = topo;
+  const w = boundaryFalloff(topo, reg, soft);
+  const buf = new Float32Array(vk * 3);
+  let moved = 0, maxd = 0;
+  for (let it = 0; it < iters; it++) {
+    buf.set(pos);
+    for (let v = 0; v < vk; v++) {
+      if (!reg[v] || w[v] <= 0) continue;
+      const a = off[v], b = off[v + 1], n = b - a;
+      if (!n) continue;
+      let sx = 0, sy = 0, sz = 0;
+      for (let j = a; j < b; j++) {
+        const u = nbr[j] * 3;
+        sx += buf[u]; sy += buf[u + 1]; sz += buf[u + 2];
+      }
+      const o = v * 3;
+      const dx = buf[o] - sx / n, dy = buf[o + 1] - sy / n, dz = buf[o + 2] - sz / n;
+      const lim = 0.5;                    // не даём улететь
+      const s = k * w[v];
+      const mx = dx * s, my = dy * s, mz = dz * s;
+      const len = Math.hypot(mx, my, mz);
+      const f = len > lim ? lim / len : 1;
+      pos[o] += mx * f; pos[o + 1] += my * f; pos[o + 2] += mz * f;
+      moved++; const dd = len * f; if (dd > maxd) maxd = dd;
+    }
+  }
+  return { moved, maxd };
+}
+
+/**
+ * Симметрия: переносит смещения узлов на их отражения по плоскости y = 0.
+ * before — координаты до правки. Пары ищутся по сетке координат, чтобы
+ * работать и на неидеально симметричной сетке.
+ */
+export function mirrorDeltas(topo, pos, before, tol = 2.5) {
+  const { vk } = topo;
+  const q = Math.max(tol, 1.0);
+  const key = (x, y, z) => Math.round(x / q) + '|' + Math.round(y / q) + '|' + Math.round(z / q);
+  const grid = new Map();
+  for (let v = 0; v < vk; v++) {
+    const o = v * 3;
+    const k = key(before[o], before[o + 1], before[o + 2]);
+    let arr = grid.get(k);
+    if (!arr) grid.set(k, arr = []);
+    arr.push(v);
+  }
+  const deltas = new Float32Array(vk * 3);
+  const touched = new Uint8Array(vk);
+  let moved = 0;
+  for (let v = 0; v < vk; v++) {
+    const o = v * 3;
+    const dx = pos[o] - before[o], dy = pos[o + 1] - before[o + 1], dz = pos[o + 2] - before[o + 2];
+    if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) < 1e-6) continue;
+    touched[v] = 1;
+    deltas[o] = dx; deltas[o + 1] = -dy; deltas[o + 2] = dz;
+  }
+  for (let v = 0; v < vk; v++) {
+    if (!touched[v]) continue;
+    const o = v * 3;
+    // отражение ищем вокруг (x, -y, z)
+    const mx = before[o], my = -before[o + 1], mz = before[o + 2];
+    let best = -1, bd = tol * tol;
+    for (let ix = -1; ix <= 1; ix++) for (let iy = -1; iy <= 1; iy++) for (let iz = -1; iz <= 1; iz++) {
+      const k = key(mx + ix * q, my + iy * q, mz + iz * q);
+      const arr = grid.get(k);
+      if (!arr) continue;
+      for (const u of arr) {
+        const uo = u * 3;
+        const d2 = (before[uo] - mx) ** 2 + (before[uo + 1] - my) ** 2 + (before[uo + 2] - mz) ** 2;
+        if (d2 < bd) { bd = d2; best = u; }
+      }
+    }
+    if (best < 0 || best === v) continue;
+    if (touched[best]) continue;          // эта точка уже двигалась сама — не дублируем
+    const bo = best * 3;
+    pos[bo] += deltas[o];
+    pos[bo + 1] += deltas[o + 1];
+    pos[bo + 2] += deltas[o + 2];
+    touched[best] = 1;
+    moved++;
+  }
+  return { moved };
+}
+
+/**
+ * Проверка сетки — то, что смотрят перед печатью:
+ * замкнутость (у каждого ребра ровно две грани), согласованность обхода,
+ * вырожденные треугольники, объём, габариты, длины рёбер.
+ */
+export function checkMesh(topo, index, pos, U = 5.8824) {
+  const nf = index.length / 3;
+  const dir = new Map();
+  let degen = 0, volume6 = 0;
+  for (let i = 0; i < index.length; i += 3) {
+    const a = index[i], b = index[i + 1], c = index[i + 2];
+    const ao = a * 3, bo = b * 3, co = c * 3;
+    const ax = pos[ao], ay = pos[ao + 1], az = pos[ao + 2];
+    const bx = pos[bo], by = pos[bo + 1], bz = pos[bo + 2];
+    const cx = pos[co], cy = pos[co + 1], cz = pos[co + 2];
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+    const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+    if (Math.hypot(nx, ny, nz) * 0.5 < 1e-9) degen++;
+    volume6 += (ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx));
+    for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+      const k = p * 1e6 + q;
+      dir.set(k, (dir.get(k) || 0) + 1);
+    }
+  }
+  let open = 0, over = 0, flip = 0;
+  const seen = new Set();
+  for (const [k, n] of dir) {
+    if (n > 1) over++;                       // ребро в одну сторону дважды
+    const a = Math.floor(k / 1e6), b = k - a * 1e6;
+    const rev = b * 1e6 + a;
+    if (seen.has(rev)) continue;
+    seen.add(k);
+    if (!dir.has(rev)) { open++; continue; } // ребра нет в обратную сторону
+    if (dir.get(rev) !== n) flip++;
+  }
+  // габариты и длины рёбер
+  let minx = Infinity, miny = Infinity, minz = Infinity;
+  let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
+  for (let v = 0; v < topo.vk; v++) {
+    const o = v * 3;
+    if (pos[o] < minx) minx = pos[o]; if (pos[o] > maxx) maxx = pos[o];
+    if (pos[o + 1] < miny) miny = pos[o + 1]; if (pos[o + 1] > maxy) maxy = pos[o + 1];
+    if (pos[o + 2] < minz) minz = pos[o + 2]; if (pos[o + 2] > maxz) maxz = pos[o + 2];
+  }
+  let minEdge = Infinity;
+  for (const k of seen.keys()) {
+    const a = Math.floor(k / 1e6), b = k - a * 1e6;
+    const d = Math.hypot(pos[a * 3] - pos[b * 3], pos[a * 3 + 1] - pos[b * 3 + 1], pos[a * 3 + 2] - pos[b * 3 + 2]);
+    if (d > 1e-9 && d < minEdge) minEdge = d;
+  }
+  const vol = Math.abs(volume6) / 6;              // в единицах модели³
+  const mm = 1 / U;
+  return {
+    faces: nf, vertices: topo.vk,
+    openEdges: open, flipEdges: flip, nonManifold: over,
+    degenerate: degen,
+    watertight: open === 0 && flip === 0 && over === 0,
+    volumeMM3: vol * mm * mm * mm,
+    sizeMM: [(maxx - minx) * mm, (maxy - miny) * mm, (maxz - minz) * mm],
+    minEdgeMM: minEdge * mm
+  };
+}
+
 /** Перед экспортом: выкинуть вершины, на которые не ссылается ни одна грань. */
 export function compactMesh(positions, index) {
   const nv = positions.length / 3;

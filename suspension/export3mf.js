@@ -133,6 +133,36 @@ export function meshTo3mf(positions, indices, opts = {}) {
   ]);
 }
 
+/* ---------- сетка → STL (двоичный) ----------
+   STL безразмерный: пишем те же числа, что и в 3MF (печать уменьшением до 17 %). */
+export function meshToSTL(positions, indices, name = 'Tayron') {
+  const nf = indices.length / 3;
+  const buf = new ArrayBuffer(84 + nf * 50);
+  const dv = new DataView(buf);
+  const head = ('Tayron body: ' + name).slice(0, 79);
+  for (let i = 0; i < head.length; i++) dv.setUint8(i, head.charCodeAt(i) & 0x7f);
+  dv.setUint32(80, nf, true);
+  let off = 84;
+  for (let i = 0; i < indices.length; i += 3) {
+    const a = indices[i] * 3, b = indices[i + 1] * 3, c = indices[i + 2] * 3;
+    const ax = positions[a], ay = positions[a + 1], az = positions[a + 2];
+    const bx = positions[b], by = positions[b + 1], bz = positions[b + 2];
+    const cx = positions[c], cy = positions[c + 1], cz = positions[c + 2];
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+    let nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    nx /= l; ny /= l; nz /= l;
+    dv.setFloat32(off, nx, true); dv.setFloat32(off + 4, ny, true); dv.setFloat32(off + 8, nz, true);
+    dv.setFloat32(off + 12, ax, true); dv.setFloat32(off + 16, ay, true); dv.setFloat32(off + 20, az, true);
+    dv.setFloat32(off + 24, bx, true); dv.setFloat32(off + 28, by, true); dv.setFloat32(off + 32, bz, true);
+    dv.setFloat32(off + 36, cx, true); dv.setFloat32(off + 40, cy, true); dv.setFloat32(off + 44, cz, true);
+    dv.setUint16(off + 48, 0, true);
+    off += 50;
+  }
+  return new Uint8Array(buf);
+}
+
 /* ---------- отдать файл пользователю ---------- */
 export function downloadBytes(bytes, filename, type = 'model/3mf') {
   const blob = new Blob([bytes], { type });
