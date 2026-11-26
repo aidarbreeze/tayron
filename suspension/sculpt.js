@@ -1145,6 +1145,15 @@ export function initSculpt(opts) {
   const rows     = Array.from(document.querySelectorAll('.sc-row'));
   const hint     = $('sc-hint');
   const info     = $('sc-info');
+  const chip     = $('sc-toolchip');
+  const TOOL_NAMES = { select: 'участок', erase: 'ластик', pen: 'перо', shape: 'фигура',
+    point: 'точка', measure: 'измерение' };
+  function syncChip() {
+    if (!chip) return;
+    if (!tool) { chip.textContent = 'просмотр'; chip.classList.add('idle'); return; }
+    chip.classList.remove('idle');
+    chip.textContent = TOOL_NAMES[tool] || tool;
+  }
   const HINTS = {
     select: hint ? hint.innerHTML : '',
     erase: 'Левой кнопкой <b>сотрите</b> лишние точки: они подсвечиваются красными ' +
@@ -1171,6 +1180,7 @@ export function initSculpt(opts) {
   };
 
   function syncInfo(note) {
+    syncChip();
     if (!info) return;
     if (note) { info.textContent = note; return; }
     const faces = liveIndex.length / 3;
@@ -1228,20 +1238,25 @@ export function initSculpt(opts) {
       : tool === 'measure' ? 'crosshair' : 'crosshair';
   }
 
-  function setTool(t) {
-    if (t !== tool) hideCursor();
-    tool = (tool === t) ? null : t;
+  /* подписи кнопок кистей: цифра = горячая клавиша */
+  function syncToolButtons() {
     const tag = (btn, v, onText, offText) => {
       if (!btn) return;
       btn.classList.toggle('on', v);
       btn.textContent = v ? onText : offText;
     };
-    tag(btnMode, tool === 'select', '■ Закончить участок', '✎ Участок');
-    tag(btnDel, tool === 'erase', '■ Закончить удаление', '⌫ Ластик');
-    tag(btnPen, tool === 'pen', '■ Закончить рисование', '✏ Рисовать');
-    tag(btnShape, tool === 'shape', '■ Закончить фигуры', '◆ Фигура');
-    tag(btnMeas, tool === 'measure', '■ Закончить измерение', '📏 Измерить');
-    tag(btnPoint, tool === 'point', '■ Закончить добавление', '✚ Точка');
+    tag(btnMode, tool === 'select', '■ Готово (участок)', '1 ✎ Участок');
+    tag(btnDel, tool === 'erase', '■ Готово (ластик)', '2 ⌫ Ластик');
+    tag(btnPen, tool === 'pen', '■ Готово (перо)', '3 ✏ Рисовать');
+    tag(btnShape, tool === 'shape', '■ Готово (фигура)', '4 ◆ Фигура');
+    tag(btnPoint, tool === 'point', '■ Готово (точка)', '5 ✚ Точка');
+    tag(btnMeas, tool === 'measure', '■ Готово (измерение)', '6 📏 Измерить');
+  }
+
+  function setTool(t) {
+    if (t !== tool) hideCursor();
+    tool = (tool === t) ? null : t;
+    syncToolButtons();
     if (hint) hint.innerHTML = HINTS[tool] || HINTS.select;
     if (tool !== 'measure') { measPts = []; measLine.visible = false; }
     if (!tool) hideCursor();
@@ -1358,7 +1373,7 @@ export function initSculpt(opts) {
     chkFront.addEventListener('change', () => {
       frontOnly = chkFront.checked;
       chkFront.classList.toggle('on', frontOnly);
-      chkFront.textContent = frontOnly ? '◐ Только видимые грани' : '◐ Грани: все';
+      chkFront.textContent = frontOnly ? '◐ Видимые грани' : '◐ Все грани';
       block = null; allow = null; regionFront = null; front.fill(frontOnly ? 0 : 1);
       syncInfo(frontOnly
         ? 'правки касаются только граней, видимых с камеры'
@@ -1423,7 +1438,7 @@ export function initSculpt(opts) {
   if (wireBtn) wireBtn.addEventListener('click', () => {
     wireOn = !wireOn;
     wireBtn.classList.toggle('on', wireOn);
-    wireBtn.textContent = wireOn ? 'Сетка вкл' : 'Сетка';
+    wireBtn.textContent = wireOn ? '▦ Сетка вкл' : '▦ Сетка';
     ensureWire();
     if (wireOn && wire) rebuildWire();
   });
@@ -1439,7 +1454,7 @@ export function initSculpt(opts) {
   if (secBtn) secBtn.addEventListener('click', () => {
     secOn = !secOn;
     secBtn.classList.toggle('on', secOn);
-    secBtn.textContent = secOn ? 'Сечение вкл' : 'Сечение';
+    secBtn.textContent = secOn ? '◧ Сечение вкл' : '◧ Сечение';
     syncSection();
   });
   if (secEl) secEl.addEventListener('input', () => {
@@ -1483,6 +1498,24 @@ export function initSculpt(opts) {
     nrm = null;
     paintMarks(); updateAddedDots(); flush(); syncInfo();
   });
+  /* ---------- горячие клавиши: 1…6 — кисти, Esc — выход, [ ] — размер кисти ---------- */
+  const TOOL_KEYS = { '1': 'select', '2': 'erase', '3': 'pen', '4': 'shape', '5': 'point', '6': 'measure' };
+  function stepBrush(d) {
+    brushMM = Math.min(20, Math.max(0.1, Math.round((brushMM + d) * 10) / 10));
+    if (brushEl) brushEl.value = String(brushMM);
+    const l = $('sc-brushv');
+    if (l) l.textContent = brushMM.toFixed(1) + ' мм';
+    syncInfo();
+  }
+  globalThis.addEventListener && globalThis.addEventListener('keydown', (e) => {
+    const tn = e.target && e.target.tagName;
+    if (tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT') return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;       // Ctrl+Z — ниже
+    if (TOOL_KEYS[e.key]) { setTool(TOOL_KEYS[e.key]); e.preventDefault(); return; }
+    if (e.key === 'Escape' && tool) { setTool(tool); e.preventDefault(); return; }
+    if (e.key === '[') { stepBrush(-0.5); e.preventDefault(); return; }
+    if (e.key === ']') { stepBrush(0.5); e.preventDefault(); }
+  });
   globalThis.addEventListener && globalThis.addEventListener('keydown', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
     const k = (e.key || '').toLowerCase();
@@ -1520,6 +1553,9 @@ export function initSculpt(opts) {
   on('sc-save', () => save('3mf'));
   on('sc-stl', () => save('stl'));
 
+  syncInfo();
+
+  syncToolButtons();   // подписи кнопок не ждут первого клика
   syncInfo();
 
   return {
