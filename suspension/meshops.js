@@ -116,25 +116,68 @@ export function freeMask(topo, reg) {
  * from — откуда считать (по умолчанию исходные координаты, pos0);
  * чтобы нажатия кнопки накапливались, передают текущие координаты.
  */
+/**
+ * Узлы на КРАЮ открытой оболочки: ребро, у которого всего одна грань.
+ * Нужен, чтобы сглаживание не стягивало край внутрь (в Blender это галочка
+ * «Boundary», в ZBrush — «Preserve Borders»): диффузия по нормали утаскивает
+ * край на 2–3 мм, деталь «худеет».
+ */
+export function boundaryNodes(topo) {
+  if (topo.bnd) return topo.bnd;
+  const { vk, tris } = topo;
+  const cnt = new Map();
+  const key = (a, b) => (a < b ? a * 1e6 + b : b * 1e6 + a);
+  for (let i = 0; i < tris.length; i += 3) {
+    const a = tris[i], b = tris[i + 1], c = tris[i + 2];
+    for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+      const k = key(p, q);
+      cnt.set(k, (cnt.get(k) || 0) + 1);
+    }
+  }
+  const bnd = new Uint8Array(vk);
+  for (const [k, n] of cnt) {
+    if (n !== 1) continue;
+    const a = Math.floor(k / 1e6), b = k - a * 1e6;
+    if (a < vk) bnd[a] = 1;
+    if (b < vk) bnd[b] = 1;
+  }
+  topo.bnd = bnd;
+  return bnd;
+}
+
 export function smoothDiffuse(topo, free, steps, lambda = 0.5, from = null) {
   const { vk, pos0, off, nbr } = topo;
   const pos = Float32Array.from(from || pos0);
   const buf = new Float32Array(vk * 3);
+  const bnd = boundaryNodes(topo);
   for (let s = 0; s < steps; s++) {
     buf.set(pos);
     for (let v = 0; v < vk; v++) {
       if (!free[v]) continue;
       const a = off[v], b = off[v + 1], n = b - a;
       if (!n) continue;
-      let sx = 0, sy = 0, sz = 0;
-      for (let k = a; k < b; k++) {
-        const w = nbr[k] * 3;
-        sx += buf[w]; sy += buf[w + 1]; sz += buf[w + 2];
+      let sx = 0, sy = 0, sz = 0, m = 0;
+      if (bnd[v]) {
+        /* край ведём ТОЛЬКО вдоль самого края: среднее по соседям, которые
+           тоже на краю. Кривая края выпрямляется, но внутрь не уезжает. */
+        for (let k = a; k < b; k++) {
+          const u = nbr[k];
+          if (!bnd[u]) continue;
+          const w = u * 3;
+          sx += buf[w]; sy += buf[w + 1]; sz += buf[w + 2]; m++;
+        }
+        if (!m) continue;                 // изолированный узел края — не двигаем
+      } else {
+        for (let k = a; k < b; k++) {
+          const w = nbr[k] * 3;
+          sx += buf[w]; sy += buf[w + 1]; sz += buf[w + 2];
+        }
+        m = n;
       }
       const o = v * 3;
-      pos[o]     += lambda * (sx / n - buf[o]);
-      pos[o + 1] += lambda * (sy / n - buf[o + 1]);
-      pos[o + 2] += lambda * (sz / n - buf[o + 2]);
+      pos[o]     += lambda * (sx / m - buf[o]);
+      pos[o + 1] += lambda * (sy / m - buf[o + 1]);
+      pos[o + 2] += lambda * (sz / m - buf[o + 2]);
     }
   }
   return pos;
@@ -613,7 +656,31 @@ export function vertexNormals(topo, index, pos) {
   return n;
 }
 
-const smooth01 = (t) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
+/**
+ * Кривые спада кисти — как в Blender (Smooth / Linear / Sphere / Root / Sharp /
+ * Constant) и ZBrush (Alpha-профили). Профиль задаёт, как гаснет вес от центра
+ * пятна к краю: от него зависит и форма валика, и «мягкость» сглаживания.
+ */
+export const FALLOFFS = ['smooth', 'linear', 'sphere', 'root', 'sharp', 'const'];
+let fallMode = 'smooth';
+export function setFalloff(m) {
+  if (FALLOFFS.includes(m)) fallMode = m;
+  return fallMode;
+}
+export function getFalloff() { return fallMode; }
+export function fall01(t) {
+  if (!(t > 0)) return 0;
+  if (t >= 1) return 1;
+  switch (fallMode) {
+    case 'linear': return t;
+    case 'sphere': return Math.sqrt(Math.max(0, 1 - (1 - t) * (1 - t)));
+    case 'root': return Math.sqrt(t);
+    case 'sharp': return t * t;
+    case 'const': return 1;
+    default: return t * t * (3 - 2 * t);
+  }
+}
+const smooth01 = fall01;
 
 /**
  * Сдвиг шара: вершины в радиусе r уезжают вдоль своих нормалей на
@@ -759,6 +826,137 @@ export function euclidFalloff(topo, pos, reg, R) {
  * Выдавливание закрашенной области: все узлы области уезжают вдоль нормалей на
  * amount, у кромки шаг гасится плавным входом (ширина soft в узлах).
  */
+/**
+ * «Расслабить» (Blender Relax / ZBrush Smooth-Peaks-off, 3D-Coat «Relax»):
+ * сглаживание ТОЛЬКО вдоль поверхности — узлы выравниваются по сетке, но форма
+ * не садится. Сдвиг по нормали снимается, остаётся касательная составляющая.
+ */
+export function relaxRegion(topo, pos, reg, iters = 2, lambda = 0.5) {
+  const { vk, off, nbr, tris } = topo;
+  if (!topo.vnrm) {
+    const n = new Float32Array(vk * 3);
+    for (let i = 0; i < tris.length; i += 3) {
+      const a = tris[i], b = tris[i + 1], c = tris[i + 2];
+      const ax = pos[a * 3], ay = pos[a * 3 + 1], az = pos[a * 3 + 2];
+      const ux = pos[b * 3] - ax, uy = pos[b * 3 + 1] - ay, uz = pos[b * 3 + 2] - az;
+      const vx = pos[c * 3] - ax, vy = pos[c * 3 + 1] - ay, vz = pos[c * 3 + 2] - az;
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      for (const q of [a, b, c]) { n[q * 3] += nx; n[q * 3 + 1] += ny; n[q * 3 + 2] += nz; }
+    }
+    for (let v = 0; v < vk; v++) {
+      const l = Math.hypot(n[v * 3], n[v * 3 + 1], n[v * 3 + 2]) || 1;
+      n[v * 3] /= l; n[v * 3 + 1] /= l; n[v * 3 + 2] /= l;
+    }
+    topo.vnrm = n;
+  }
+  const n = topo.vnrm;
+  const buf = new Float32Array(vk * 3);
+  const bnd = boundaryNodes(topo);
+  let moved = 0, maxd = 0;
+  for (let it = 0; it < iters; it++) {
+    buf.set(pos);
+    for (let v = 0; v < vk; v++) {
+      if (!reg[v]) continue;
+      const a = off[v], b = off[v + 1], cnt = b - a;
+      if (!cnt) continue;
+      let sx = 0, sy = 0, sz = 0;
+      for (let k = a; k < b; k++) {
+        const u = nbr[k] * 3;
+        sx += buf[u]; sy += buf[u + 1]; sz += buf[u + 2];
+      }
+      const o = v * 3;
+      let dx = sx / cnt - buf[o], dy = sy / cnt - buf[o + 1], dz = sz / cnt - buf[o + 2];
+      const dn = dx * n[o] + dy * n[o + 1] + dz * n[o + 2];
+      dx -= n[o] * dn; dy -= n[o + 1] * dn; dz -= n[o + 2] * dn;   // только вдоль поверхности
+      /* у края области гасим, чтобы не рвать стык с неподвижной геометрией */
+      const k2 = bnd[v] ? 0.5 : 1;
+      const mx = dx * lambda * k2, my = dy * lambda * k2, mz = dz * lambda * k2;
+      pos[o] += mx; pos[o + 1] += my; pos[o + 2] += mz;
+      moved++;
+      const d = Math.hypot(mx, my, mz);
+      if (d > maxd) maxd = d;
+    }
+  }
+  return { moved, maxd };
+}
+
+/**
+ * «Защемить» (ZBrush Pinch, Blender Pinch): узлы области стягиваются к её
+ * центру ВДОЛЬ поверхности. Так сводят край детали в острую линию, не поднимая
+ * и не опуская её. amount — доля сжатия (0.3 = на 30 % к центру).
+ */
+export function pinchRegion(topo, pos, reg, amount = 0.3, iters = 2) {
+  const { vk, tris } = topo;
+  let cx = 0, cy = 0, cz = 0, n = 0;
+  for (let v = 0; v < vk; v++) if (reg[v]) { cx += pos[v * 3]; cy += pos[v * 3 + 1]; cz += pos[v * 3 + 2]; n++; }
+  if (!n) return { moved: 0, maxd: 0 };
+  cx /= n; cy /= n; cz /= n;
+  if (!topo.vnrm) {
+    const nv = new Float32Array(vk * 3);
+    for (let i = 0; i < tris.length; i += 3) {
+      const a = tris[i], b = tris[i + 1], c = tris[i + 2];
+      const ax = pos[a * 3], ay = pos[a * 3 + 1], az = pos[a * 3 + 2];
+      const ux = pos[b * 3] - ax, uy = pos[b * 3 + 1] - ay, uz = pos[b * 3 + 2] - az;
+      const vx = pos[c * 3] - ax, vy = pos[c * 3 + 1] - ay, vz = pos[c * 3 + 2] - az;
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      for (const q of [a, b, c]) { nv[q * 3] += nx; nv[q * 3 + 1] += ny; nv[q * 3 + 2] += nz; }
+    }
+    for (let v = 0; v < vk; v++) {
+      const l = Math.hypot(nv[v * 3], nv[v * 3 + 1], nv[v * 3 + 2]) || 1;
+      nv[v * 3] /= l; nv[v * 3 + 1] /= l; nv[v * 3 + 2] /= l;
+    }
+    topo.vnrm = nv;
+  }
+  const nn = topo.vnrm;
+  let moved = 0, maxd = 0;
+  for (let it = 0; it < iters; it++) {
+    for (let v = 0; v < vk; v++) {
+      if (!reg[v]) continue;
+      const o = v * 3;
+      let dx = cx - pos[o], dy = cy - pos[o + 1], dz = cz - pos[o + 2];
+      const dn = dx * nn[o] + dy * nn[o + 1] + dz * nn[o + 2];
+      dx -= nn[o] * dn; dy -= nn[o + 1] * dn; dz -= nn[o + 2] * dn;  // только вдоль поверхности
+      const mx = dx * amount, my = dy * amount, mz = dz * amount;
+      const d = Math.hypot(mx, my, mz);
+      if (d < 1e-9) continue;
+      pos[o] += mx; pos[o + 1] += my; pos[o + 2] += mz;
+      moved++; if (d > maxd) maxd = d;
+    }
+  }
+  return { moved, maxd };
+}
+
+/** Вырастить/уменьшить выделение на k колец по рёбрам (Blender Ctrl+= / Ctrl+-). */
+export function growRegion(topo, reg, k = 1) {
+  const { vk, off, nbr } = topo;
+  let added = 0;
+  for (let it = 0; it < k; it++) {
+    const add = [];
+    for (let v = 0; v < vk; v++) {
+      if (reg[v]) continue;
+      for (let j = off[v]; j < off[v + 1]; j++) if (reg[nbr[j]]) { add.push(v); break; }
+    }
+    for (const v of add) reg[v] = 1;
+    added += add.length;
+  }
+  return added;
+}
+
+export function shrinkRegion(topo, reg, k = 1) {
+  const { vk, off, nbr } = topo;
+  let removed = 0;
+  for (let it = 0; it < k; it++) {
+    const del = [];
+    for (let v = 0; v < vk; v++) {
+      if (!reg[v]) continue;
+      for (let j = off[v]; j < off[v + 1]; j++) if (!reg[nbr[j]]) { del.push(v); break; }
+    }
+    for (const v of del) reg[v] = 0;
+    removed += del.length;
+  }
+  return removed;
+}
+
 export function offsetRegion(topo, pos, reg, amount, normals, soft = 4) {
   const { vk } = topo;
   /* ширина входа в единицах модели: soft «колец» × средняя длина ребра области */
@@ -774,7 +972,9 @@ export function offsetRegion(topo, pos, reg, amount, normals, soft = 4) {
   let moved = 0, maxd = 0;
   for (let v = 0; v < vk; v++) {
     if (!reg[v]) continue;
-    const wv = wAll ? 1 : w[v] * k;
+    /* профиль кисти (Профиль в панели) домножает затухание: «ровный» даёт
+       плоскую площадку с резкой кромкой, «острый» — купол. Как Alpha в ZBrush. */
+    const wv = wAll ? 1 : fall01(w[v] * k);
     if (wv <= 0) continue;
     const o = v * 3;
     const s = amount * wv;

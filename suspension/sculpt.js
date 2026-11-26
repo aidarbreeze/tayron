@@ -26,9 +26,10 @@
 import * as THREE from 'three';
 import { meshTo3mf, meshToSTL, downloadBytes } from './export3mf.js';
 import {
-  buildTopology, freeMask, smoothDiffuse, boundaryFalloff, paintBall,
+  buildTopology, freeMask, smoothDiffuse, boundaryFalloff, paintBall, setFalloff, FALLOFFS,
   expandToVertices, deleteAndFill, compactMesh, vertexNormals,
   pushBall, offsetRegion, imprintShape, flattenRegion, sharpenRegion, clampFlips, boundaryEdgeKeys,
+  relaxRegion, growRegion, shrinkRegion, pinchRegion,
   euclidFalloff,
   mirrorDeltas, checkMesh
 } from './meshops.js';
@@ -264,7 +265,7 @@ export function initSculpt(opts) {
     const L2 = ex * ex + ey * ey + ez * ez;
     if (L2 < 1e-12) return { ok: false, why: 'нулевое ребро' };
     let t = ((p[0] - ax) * ex + (p[1] - ay) * ey + (p[2] - az) * ez) / L2;
-    t = Math.min(0.88, Math.max(0.12, t));      // не вырождаемся в вершину
+    t = Math.min(0.80, Math.max(0.20, t));      // не прилипаем к вершине и не режем крайность
     const px = ax + ex * t, py = ay + ey * t, pz = az + ez * t;
 
     const li = liveIndex, m = li.length / 3, hit = new Map();
@@ -435,11 +436,26 @@ export function initSculpt(opts) {
   function addPointsAt(clientX, clientY) {
     const h = hitFace(clientX, clientY);
     if (!h) return;
-    if (lastPt) {
-      const dx = h.p[0] - lastPt[0], dy = h.p[1] - lastPt[1], dz = h.p[2] - lastPt[2];
-      if (dx * dx + dy * dy + dz * dz < (0.35 * U * 0.01) ** 2) {
-        if (info) info.textContent = 'точка здесь уже стоит — сдвиньте курсор';
-        return;
+    /* Повторный клик в то же место не должен плодить узел поверх узла: получилась
+       бы нулевая грань (в Blender «Insert vertex» так же упирается в вершину).
+       Допуск — 20 % наименьшего ребра грани под курсором, но не мельче 0.2 % U. */
+    const b3 = h.faceIndex * 3;
+    if (b3 >= 0 && b3 + 2 < liveIndex.length) {
+      const i0 = liveIndex[b3], i1 = liveIndex[b3 + 1], i2 = liveIndex[b3 + 2];
+      const e = (a, b) => Math.hypot(src[a * 3] - src[b * 3], src[a * 3 + 1] - src[b * 3 + 1], src[a * 3 + 2] - src[b * 3 + 2]);
+      const minEdge = Math.min(e(i0, i1), e(i1, i2), e(i2, i0));
+      /* Допуск «уже стоит» — 8 % ребра (на кузове это 0.08 мм): он ловит
+         повторный клик в ту же точку, но не запрещает ставить точку внутри
+         мелкой грани — с 20 % половина кузова была в «мёртвых зонах». */
+      const tol = Math.max(0.08 * minEdge, 0.02 * U);
+      const v = nearestNode(h.p);
+      if (v >= 0) {
+        const d = Math.hypot(pos[v * 3] - h.p[0], pos[v * 3 + 1] - h.p[1], pos[v * 3 + 2] - h.p[2]);
+        if (d < tol) {
+          ptMsg = `точка здесь уже стоит (${(d / U).toFixed(2)} мм до вершины) — сдвиньте курсор`;
+          if (info) info.textContent = ptMsg;
+          return;
+        }
       }
     }
     if (!ptSnap) ptSnap = snapshot();
@@ -467,8 +483,10 @@ export function initSculpt(opts) {
     if (!camera || !camera.position) { front.fill(1); return; }
     const cp = mesh.worldToLocal(camera.position.clone());
     /* узел «лицевой», если его нормаль смотрит на камеру; для склеенной
-       (canon) сетки это точнее, чем «принадлежит лицевой грани» */
-    const vn = vertexNormals(topo, liveIndex, pos);
+       (canon) сетки это точнее, чем «принадлежит лицевой грани».
+       Нормали берём из общего кэша: без этого на кузове они считались дважды
+       за нажатие (computeFront + перо) — лишние ~100 мс. */
+    const vn = getNormals();
     /* Нормаль под курсором: кисть правит ту поверхность, куда попал луч, и не
        должна проходить сквозь тонкую стенку на её обратную сторону. */
     let hx = 0, hy = 0, hz = 0;
@@ -612,6 +630,7 @@ export function initSculpt(opts) {
 
   /* ---------- координаты → геометрия ---------- */
   function flush(withNormals = true) {
+    hitCache = null;                       // геометрия изменилась — луч заново
     expandToVertices(topo, pos, src);
     attr.needsUpdate = true;
     /* Вершин стало больше (точка, зеркальная копия) — цвет и нормали обязаны
@@ -738,26 +757,34 @@ export function initSculpt(opts) {
   const brushR = () => brushMM * U;
   const depthD = () => depthMM * U;
 
-  function hit(clientX, clientY) {
+  /* Луч по 100 000 граней кузова — 20–40 мс. За одно событие мыши его спрашивают
+     трижды (кольцо кисти + точка попадания + грань), поэтому результат
+     запоминаем по координатам курсора: 90 мс на движение → 45. */
+  let hitCache = null;
+  function rayHit(clientX, clientY) {
+    if (hitCache && hitCache.x === clientX && hitCache.y === clientY) return hitCache.h;
     ndc.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
     ray.setFromCamera(ndc, camera);
     const hits = ray.intersectObject(mesh, false);
-    if (!hits.length) return null;
-    return mesh.worldToLocal(hits[0].point.clone());
+    let h = null;
+    if (hits.length) {
+      const p = mesh.worldToLocal(hits[0].point.clone());
+      h = { p: [p.x, p.y, p.z], faceIndex: hits[0].faceIndex };
+    }
+    hitCache = { x: clientX, y: clientY, h };
+    return h;
+  }
+  function hit(clientX, clientY) {
+    const h = rayHit(clientX, clientY);
+    return h ? { x: h.p[0], y: h.p[1], z: h.p[2] } : null;
   }
   function hitPoint(clientX, clientY) {
-    const p = hit(clientX, clientY);
-    return p ? [p.x, p.y, p.z] : null;
+    const h = rayHit(clientX, clientY);
+    return h ? h.p : null;
   }
   /** попадание вместе с номером грани — нужно инструменту «Точка» */
   function hitFace(clientX, clientY) {
-    ndc.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
-    ray.setFromCamera(ndc, camera);
-    const hits = ray.intersectObject(mesh, false);
-    if (!hits.length) return null;
-    const h = hits[0];
-    const p = mesh.worldToLocal(h.point.clone());
-    return { p: [p.x, p.y, p.z], faceIndex: h.faceIndex };
+    return rayHit(clientX, clientY);
   }
   /** ближайший узел, но не дальше maxD — иначе клик в дырку цеплял бы узел
       с другой стороны кузова */
@@ -832,6 +859,28 @@ export function initSculpt(opts) {
     c.visible = true;
   }
 
+  /* ---------- шаг штриха ----------
+     Мышь приходит редкими событиями: при быстром движении пятна кисти стоят
+     через 5–10 мм, и валик выходит «пунктиром» (провалы до нуля). В Blender это
+     решает Spacing (10 % кисти) — у нас между событиями ставим промежуточные
+     отпечатки с шагом 25 % радиуса. */
+  let lastW = null;
+  function strokeSegment(p, fn) {
+    if (!lastW) { lastW = [p[0], p[1], p[2]]; fn(p); return; }
+    const dx = p[0] - lastW[0], dy = p[1] - lastW[1], dz = p[2] - lastW[2];
+    const d = Math.hypot(dx, dy, dz);
+    /* Шаг 25 % кисти, но не больше 4 отпечатков на событие: иначе на кузове
+       (52 657 узлов) одно движение мыши считается 250 мс, а не 30. */
+    const step = Math.max(0.25 * brushR(), 0.02 * U);
+    const n = Math.min(4, Math.round(d / step));
+    for (let i = 1; i < n; i++) {
+      const t = i / n;
+      fn([lastW[0] + dx * t, lastW[1] + dy * t, lastW[2] + dz * t]);
+    }
+    fn(p);
+    lastW = [p[0], p[1], p[2]];
+  }
+
   /* ---------- 1. выбор участка ---------- */
   function paintAt(c) {
     const skip = block || dead;           // что нельзя трогать в этом штрихе
@@ -846,8 +895,7 @@ export function initSculpt(opts) {
   function stamp(clientX, clientY) {
     const c = hitPoint(clientX, clientY);
     if (!c) return;
-    paintAt(c);
-    if (sym) paintAt([c[0], -c[1], c[2]]);
+    strokeSegment(c, q => { paintAt(q); if (sym) paintAt([q[0], -q[1], q[2]]); });
     syncInfo();
   }
 
@@ -876,10 +924,9 @@ export function initSculpt(opts) {
   function eraseStamp(clientX, clientY) {
     const c = hitPoint(clientX, clientY);
     if (!c) return 0;
-    const one = eraseOneAt.bind(null), many = eraseAt;
-    const f = invert ? one : many;
-    let n = f(c);
-    if (sym) n += f([c[0], -c[1], c[2]]);
+    const f = invert ? eraseOneAt : eraseAt;
+    let n = 0;
+    strokeSegment(c, q => { n += f(q); if (sym) n += f([q[0], -q[1], q[2]]); });
     if (n) { strokeDel += n; paintMarks(); updateDots(); syncInfo(); }
     return n;
   }
@@ -907,10 +954,38 @@ export function initSculpt(opts) {
   /** Шаг сетки под кистью: примерно 8 узлов поперёк пятна и не грубее глубины.
       Кисть меньше грани иначе двигает одну точку — получается «шип». */
   function detailFor(r) {
-    return Math.max(r / 4, 0.12 * U);
+    /* Шаг сгущения ≈ диаметр/5 (у Blender dyntopo «Detail» по умолчанию ~10 %
+       кисти). Было r/4: на кузове (рёбра ~1 мм) кисть 3 мм дробила пятно до
+       0.75 мм — 3000 новых узлов и 700 мс на нажатие ради незаметной разницы. */
+    return Math.max(r / 2.5, 0.12 * U);
+  }
+  /** Самое длинное ребро в пятне кисти: если оно уже не длиннее шага сгущения,
+      сгущать нечего. Один проход по граням (O(F)) дешевле восьми проходов
+      refineSphere — на кузове это 500 мс на каждое нажатие пера. */
+  function localMaxEdge(c, r, thr = 0) {
+    const r2 = r * r;
+    let mx = 0, cnt = 0;
+    for (let f = 0; f < liveIndex.length; f += 3) {
+      const i0 = liveIndex[f], i1 = liveIndex[f + 1], i2 = liveIndex[f + 2];
+      const o0 = i0 * 3, o1 = i1 * 3, o2 = i2 * 3;
+      const d0 = (src[o0] - c[0]) ** 2 + (src[o0 + 1] - c[1]) ** 2 + (src[o0 + 2] - c[2]) ** 2;
+      const d1 = (src[o1] - c[0]) ** 2 + (src[o1 + 1] - c[1]) ** 2 + (src[o1 + 2] - c[2]) ** 2;
+      const d2 = (src[o2] - c[0]) ** 2 + (src[o2 + 1] - c[1]) ** 2 + (src[o2 + 2] - c[2]) ** 2;
+      if (d0 > r2 && d1 > r2 && d2 > r2) continue;
+      for (const [a, b] of [[o0, o1], [o1, o2], [o2, o0]]) {
+        const e = Math.hypot(src[a] - src[b], src[a + 1] - src[b + 1], src[a + 2] - src[b + 2]);
+        if (e > mx) mx = e;
+        if (thr && e > thr) cnt++;
+      }
+    }
+    return thr ? cnt : mx;
   }
   /** Перед правкой сгустить пятно кисти (иначе на грубой сетке правки нет). */
   function ensureDetail(c, r, budget = 3000) {
+    /* Сгущать незачем, если длинных рёбер в пятне единицы: 3-4 длинных ребра
+       дают 1-2 лишние точки, а полный проход стоит 40 мс. */
+    const target = detailFor(r);
+    if (localMaxEdge(c, r * 1.25, target) < 8) return 0;
     const n = refineSphere(c, r * 1.25, detailFor(r), budget);
     if (n) { ensureTopo(); nrm = null; }
     return n;
@@ -953,8 +1028,10 @@ export function initSculpt(opts) {
   function penStamp(clientX, clientY, sign) {
     const c = hitPoint(clientX, clientY);
     if (!c) return 0;
-    const m = penAt(c, sign) + (sym ? penAt([c[0], -c[1], c[2]], sign) : 0);
-    if (m) clampFlips(pos, penBase, topo.tris);
+    let m = 0;
+    strokeSegment(c, q => { m += penAt(q, sign) + (sym ? penAt([q[0], -q[1], q[2]], sign) : 0); });
+    /* clampFlips перебирает все грани (122 000 на кузове) — на каждое движение
+       мыши это ~150 мс. Запускаем его один раз, по отпусканию кнопки. */
     clampPenStroke();
     nrm = null;                            // нормали после обрезки другие
     return m;
@@ -1518,7 +1595,10 @@ export function initSculpt(opts) {
     const pt = (i) => [src[i * 3], src[i * 3 + 1], src[i * 3 + 2]];
     const len2 = (A, B) => (B[0] - A[0]) ** 2 + (B[1] - A[1]) ** 2 + (B[2] - A[2]) ** 2;
     let total = 0;
-    for (let pass = 0; pass < 8 && total < budget; pass++) {
+    /* Каждый проход — полный обход граней (122 000 на кузове). Восемь проходов
+       давали 700 мс; бисекция Ривары делит ребро вдвое, так что трёх проходов
+       хватает (4 мм → 0.5 мм). */
+    for (let pass = 0; pass < 3 && total < budget; pass++) {
       const cuts = new Map();
       /* ключ ребра — по КАНОНИЧЕСКИМ узлам: в 3MF/GLB вершины на швах
          размножены, и одно и то же ребро иначе выглядит как два разных —
@@ -1545,7 +1625,13 @@ export function initSculpt(opts) {
         /* ребро берём, если оно задевает пятно кисти */
         const dA = distC(A), dB = distC(B);
         if (dA > R && dB > R) return;
-        if (len2(A, B) <= s2) return;                 // уже мелко
+        /* Шаг РАСТЁТ к краю пятна (graded refinement из Blender dyntopo):
+           в центре режем до target, у края допускаем до 3×target. Резкая
+           граница «мелко | крупно» давала длинные тонкие треугольники —
+           минимальный угол падал до 2.7°. */
+        const dm = Math.min(dA, dB);
+        const grow = 1 + 2 * Math.min(1, dm / R);
+        if (len2(A, B) <= s2 * grow * grow) return;   // уже мелко
         if (dead[canon[ia]] || dead[canon[ib]]) return; // ластик уже пометил
         const p = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2, (A[2] + B[2]) / 2];
         if (clashC(p)) return;
@@ -2342,6 +2428,78 @@ export function initSculpt(opts) {
     if (info) info.textContent = `обострено: ${res.moved} вершин (макс. ${(res.maxd / U).toFixed(3)} мм)`;
   }
 
+  /** ⇢ Расслабить: узлы ровнее, форма та же. */
+  function relaxOnce() {
+    if (!needRegion()) return;
+    pushHist();
+    const before = sym ? Float32Array.from(pos) : null;
+    const pre = Float32Array.from(pos);
+    const steps = Math.max(2, Math.round(amount / 100 * 12));
+    const res = relaxRegion(topo, pos, frontMaskedRegion(), steps, 0.5);
+    clampFlips(pos, pre, topo.tris, 0.05, 6, 0.15);
+    symAfter(before);
+    nrm = null;
+    flush();
+    if (info) info.textContent = `расслаблено: ${res.moved} вершин, макс. сдвиг ${(res.maxd / U).toFixed(3)} мм (форма не меняется)`;
+  }
+
+  /** ⇤ Защемить: стянуть область к её центру вдоль поверхности. */
+  function pinchOnce() {
+    if (!needRegion()) return;
+    pushHist();
+    const before = sym ? Float32Array.from(pos) : null;
+    const pre = Float32Array.from(pos);
+    const amt = Math.max(0.05, Math.min(0.6, amount / 200));
+    const res = pinchRegion(topo, pos, frontMaskedRegion(), amt, 2);
+    clampFlips(pos, pre, topo.tris, 0.05, 6, 0.15);
+    symAfter(before);
+    nrm = null;
+    flush();
+    if (info) info.textContent = `защемлено: ${res.moved} вершин, к центру на ${(res.maxd / U).toFixed(2)} мм`;
+  }
+
+  /** ＋ Шире / － Уже: выделение растёт или сжимается по кольцам рёбер. */
+  function growOnce(k) {
+    if (!needRegion()) return;
+    pushHist();
+    ensureTopo();
+    const n = k > 0 ? growRegion(topo, reg, k) : shrinkRegion(topo, reg, -k);
+    regionN = 0;
+    for (let v = 0; v < vk; v++) if (reg[v]) regionN++;
+    regionFront = null;
+    paintMarks();
+    flush();
+    if (info) info.textContent = `${k > 0 ? 'выделение шире' : 'выделение уже'} на ${Math.abs(n)} вершин · всего ${regionN}`;
+  }
+
+  /** ⇋ Инверсия: всё видимое, кроме закрашенного. */
+  function invertRegion() {
+    pushHist();
+    ensureTopo();
+    /* центр — по текущей закраске (или по габариту сетки, если пусто): по нему
+       строится маска «видимых граней», чтобы инверсия не залезла на изнанку */
+    let cx = 0, cy = 0, cz = 0, n = 0;
+    for (let v = 0; v < vk; v++) if (reg[v]) { cx += pos[v * 3]; cy += pos[v * 3 + 1]; cz += pos[v * 3 + 2]; n++; }
+    if (n) { cx /= n; cy /= n; cz /= n; }
+    else {
+      let mnx = Infinity, mny = Infinity, mnz = Infinity, mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+      for (let v = 0; v < vk; v++) {
+        mnx = Math.min(mnx, pos[v * 3]); mxx = Math.max(mxx, pos[v * 3]);
+        mny = Math.min(mny, pos[v * 3 + 1]); mxy = Math.max(mxy, pos[v * 3 + 1]);
+        mnz = Math.min(mnz, pos[v * 3 + 2]); mxz = Math.max(mxz, pos[v * 3 + 2]);
+      }
+      cx = (mnx + mxx) / 2; cy = (mny + mxy) / 2; cz = (mnz + mxz) / 2;
+    }
+    if (frontOnly) computeFront([cx, cy, cz]);
+    let k = 0;
+    const nr = new Uint8Array(vk);
+    for (let v = 0; v < vk; v++) if ((!frontOnly || front[v]) && !reg[v]) { nr[v] = 1; k++; }
+    reg = nr; regionN = k; regionFront = null;
+    paintMarks();
+    flush();
+    if (info) info.textContent = `инверсия: выделено ${k} вершин`;
+  }
+
   function extrude(sign) {
     if (!needRegion()) return;
     pushHist();
@@ -2491,7 +2649,9 @@ export function initSculpt(opts) {
     show('sc-amtrow', tool === 'select');
     show('sc-actions', tool === 'select' || tool === 'rect');
     show('sc-extrude-row', tool === 'select' || tool === 'rect');
+    show('sc-pinchrow', tool === 'select' || tool === 'rect');
     show('sc-shaperow', tool === 'shape');
+    show('sc-fallrow', tool !== 'measure' && tool !== 'point' && tool !== 'erase');
     const depthRow = $('sc-depthrow');
     if (depthRow) depthRow.classList.toggle('hd',
       tool === 'erase' || tool === 'measure' || tool === 'point');
@@ -2565,6 +2725,7 @@ export function initSculpt(opts) {
     if (tool === 'measure') { addMeasurePoint(e.clientX, e.clientY); return; }
     painting = true;
     invert = e.shiftKey;
+    lastW = null;                            // новый штрих — новый отсчёт шага
     try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
     if (tool === 'rect') {
       rectStart = [e.clientX, e.clientY];
@@ -2585,7 +2746,7 @@ export function initSculpt(opts) {
       if (c0) computeFront(c0);
       makeBlock();
       const r0 = brushR();
-      if (c0) refineSphere(c0, r0 * 1.25, detailFor(r0), 3000);
+      if (c0) ensureDetail(c0, r0, 3000);
       penBase = Float32Array.from(pos);       // отсчёт — уже по сгущённой сетке
       ensureTopo(); nrm = null;
       penStamp(e.clientX, e.clientY, invert ? -1 : 1);
@@ -2618,7 +2779,10 @@ export function initSculpt(opts) {
     }
     else if (tool === 'point') addPointsAt(e.clientX, e.clientY);
     else if (tool === 'erase') eraseStamp(e.clientX, e.clientY);
-    else if (tool === 'pen') { penStamp(e.clientX, e.clientY, invert ? -1 : 1); flush(); }
+    /* Во время штриха нормали не пересчитываем: computeVertexNormals на
+       100 000 граней — это ~200 мс на каждое движение мыши. Пересчёт один раз,
+       по отпусканию кнопки (см. stop). */
+    else if (tool === 'pen') { penStamp(e.clientX, e.clientY, invert ? -1 : 1); flush(false); }
     else if (tool === 'groove') {
       if (!grooveA) return;
       const p = hitPoint(e.clientX, e.clientY);
@@ -2641,8 +2805,11 @@ export function initSculpt(opts) {
       strokeSnap = null;
       applyErase(n);
     } else if (tool === 'pen') {
+      if (penBase) clampFlips(pos, penBase, topo.tris, 0.05, 6, 0.15);   // страховка от выворотов — один раз на штрих
       nrm = null;
       penBase = null;
+      flush();                             // нормали и габарит — один раз на штрих
+      paintMarks();
       if (info) info.textContent = `перо: сдвинуто ${penMoved} вершин, высота до ${depthMM.toFixed(2)} мм` +
         (invert ? ' (канавка)' : '');
     } else if (tool === 'point') {
@@ -2749,6 +2916,8 @@ export function initSculpt(opts) {
     $('sc-depthv').textContent = depthMM.toFixed(2) + ' мм';
     syncInfo();
   });
+  const fallEl = $('sc-fall');
+  if (fallEl) fallEl.addEventListener('change', () => { setFalloff(fallEl.value); syncInfo(); });
   const amtEl = $('sc-amt');
   if (amtEl) amtEl.addEventListener('input', () => {
     amount = +amtEl.value;
@@ -2761,6 +2930,11 @@ export function initSculpt(opts) {
   on('sc-sharp', sharpenOnce);
   on('sc-out', () => extrude(1));
   on('sc-in', () => extrude(-1));
+  on('sc-relax', relaxOnce);
+  on('sc-pinch', pinchOnce);
+  on('sc-grow', () => growOnce(1));
+  on('sc-shrink', () => growOnce(-1));
+  on('sc-invert', invertRegion);
 
   /* сетка */
   const wireBtn = $('wire');

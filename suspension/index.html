@@ -187,6 +187,17 @@
     <input type="range" id="sc-depth" min="0.05" max="3" step="0.05" value="0.5">
     <span class="val" id="sc-depthv">0.50 мм</span>
   </div>
+  <div class="row sc-row hd" id="sc-fallrow">
+    <span class="tag" style="width:auto">Профиль</span>
+    <select id="sc-fall" class="inp" style="flex:1">
+      <option value="smooth">плавный (Blender Smooth)</option>
+      <option value="linear">линейный</option>
+      <option value="sphere">сфера</option>
+      <option value="root">корень</option>
+      <option value="sharp">острый</option>
+      <option value="const">ровный</option>
+    </select>
+  </div>
   <div class="row sc-row hd" id="sc-amtrow">
     <span class="tag" style="width:auto">Степень</span>
     <input type="range" id="sc-amt" min="5" max="100" step="1" value="25">
@@ -202,6 +213,9 @@
     <button class="btn" id="sc-flat">▭ Выровнять</button>
     <button class="btn" id="sc-sharp">✦ Обострить</button>
   </div>
+  <div class="presets sc-row hd" id="sc-pinchrow">
+    <button class="btn" id="sc-pinch" title="Стянуть выделенное к центру вдоль поверхности — сводит край в острую линию (ZBrush Pinch)">⇤ Защемить</button>
+  </div>
   <div class="presets sc-row hd" id="sc-extrude-row">
     <button class="btn" id="sc-out">⬆ Выдавить</button>
     <button class="btn" id="sc-in">⬇ Вдавить</button>
@@ -209,6 +223,10 @@
   <div class="presets hd" id="sc-regrow">
     <button class="btn" id="sc-deselect" title="Снять выделение (клавиша 0)">✕ Снять</button>
     <button class="btn" id="sc-mirror" title="Скопировать выделенную часть на другую сторону (y → −y)">⇄ Зеркально</button>
+    <button class="btn" id="sc-grow" title="Вырастить выделение на кольцо (как Ctrl+= в Blender)">＋ Шире</button>
+    <button class="btn" id="sc-shrink" title="Сузить выделение на кольцо (как Ctrl+- в Blender)">－ Уже</button>
+    <button class="btn" id="sc-invert" title="Выделить всё, кроме закрашенного">⇋ Инверсия</button>
+    <button class="btn" id="sc-relax" title="Выровнять узлы вдоль поверхности, не меняя форму">⇢ Расслабить</button>
   </div>
 
   <h2>Вид и проверка</h2>
