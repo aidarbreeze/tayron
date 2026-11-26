@@ -87,7 +87,15 @@ export function buildTopology(position, index, q = 1e-3) {
   const fill = off.slice(0, vk);
   for (let i = 0; i < tos.length; i += 2) nbr[fill[tos[i]]++] = tos[i + 1];
 
-  return { count, vk, pos0, canon, tris, off, nbr, welded };
+  /* --- представитель узла: первая вершина файла с этой позицией ---
+     нужен, чтобы вернуть треугольники в индексы файла (экспорт 3MF) */
+  const rep = new Int32Array(vk).fill(-1);
+  for (let i = 0; i < count; i++) {
+    const c = canon[i];
+    if (rep[c] < 0) rep[c] = i;
+  }
+
+  return { count, vk, pos0, canon, tris, off, nbr, welded, rep };
 }
 
 /** Внутренность области: узлы, у всех соседей которых та же область. */
@@ -164,13 +172,14 @@ export function boundaryFalloff(topo, reg, ringMax = 4) {
 }
 
 /** Заливка кистью: узлы в шаре радиуса r вокруг точки p. */
-export function paintBall(topo, reg, p, r, pos) {
+export function paintBall(topo, reg, p, r, pos, skip) {
   const { vk } = topo;
   const P = pos || topo.pos0;
   const r2 = r * r;
   let added = 0;
   for (let v = 0; v < vk; v++) {
     if (reg[v]) continue;
+    if (skip && skip[v]) continue;          // удалённые ластиком точки не красим
     const o = v * 3;
     const dx = P[o] - p[0], dy = P[o + 1] - p[1], dz = P[o + 2] - p[2];
     if (dx * dx + dy * dy + dz * dz <= r2) { reg[v] = 1; added++; }
@@ -186,4 +195,321 @@ export function expandToVertices(topo, pos, out) {
     out[o] = pos[c]; out[o + 1] = pos[c + 1]; out[o + 2] = pos[c + 2];
   }
   return out;
+}
+
+/* ============================================================
+   Удаление вершин с автоматической зашивкой дыр.
+
+   deleted[c] = 1 — узел c убираем. Грани, задевающие такие узлы, выбрасываются;
+   на их месте остаются дырки. Каждую дырку зашиваем треугольниками по её же
+   кромке: новые точки не появляются, поверхность сама соединяется с ближайшими
+   оставшимися вершинами (ими и является кромка дырки).
+
+   Заливка — «отрезание ушей» в плоскости кромки: дырка проецируется на свою
+   плоскость, треугольники режутся по контуру, поэтому заплатка получается
+   плоской, а не седлом.
+   ============================================================ */
+
+/** Кромка дыр: направленные рёбра без парного обратного + вершины-«пинчи». */
+function boundaryEdges(keep, vk) {
+  const key = (a, b) => a * vk + b;
+  const dir = new Set();
+  for (let i = 0; i < keep.length; i += 3) {
+    const a = keep[i], b = keep[i + 1], c = keep[i + 2];
+    dir.add(key(a, b)); dir.add(key(b, c)); dir.add(key(c, a));
+  }
+  const next = new Map();                 // a → b для кромочных рёбер
+  const outDeg = new Map(), inDeg = new Map();
+  for (const k of dir) {
+    const a = Math.floor(k / vk), b = k - a * vk;
+    if (dir.has(key(b, a))) continue;
+    next.set(a, b);
+    outDeg.set(a, (outDeg.get(a) || 0) + 1);
+    inDeg.set(b, (inDeg.get(b) || 0) + 1);
+  }
+  /* вершина, через которую кромка проходит дважды: дыра касается себя.
+     Такую дыру не зашить — вершину тоже придётся убрать. */
+  const pinch = [];
+  const verts = new Set([...outDeg.keys(), ...inDeg.keys()]);
+  for (const v of verts) if (outDeg.get(v) !== 1 || inDeg.get(v) !== 1) pinch.push(v);
+  return { next, pinch };
+}
+
+/** Замкнутые контуры кромки (когда все степени 1 — это гарантированно циклы). */
+function boundaryLoops(next) {
+  const loops = [];
+  const seen = new Set();
+  for (const start of next.keys()) {
+    if (seen.has(start)) continue;
+    const loop = [];
+    let v = start, closed = false;
+    while (v !== undefined && !seen.has(v)) {
+      seen.add(v); loop.push(v);
+      v = next.get(v);
+      if (v === start) { closed = true; break; }
+    }
+    if (closed && loop.length >= 3) loops.push(loop);
+  }
+  return loops;
+}
+
+/** Проекция кромки на её плоскость: базис (u, v) и 2D-контур. */
+function flattenLoop(loop, pos) {
+  const n = loop.length;
+  let cx = 0, cy = 0, cz = 0;
+  for (const id of loop) { cx += pos[id * 3]; cy += pos[id * 3 + 1]; cz += pos[id * 3 + 2]; }
+  cx /= n; cy /= n; cz /= n;
+  // нормаль Ньюэлла
+  let nx = 0, ny = 0, nz = 0;
+  for (let i = 0; i < n; i++) {
+    const a = loop[i] * 3, b = loop[(i + 1) % n] * 3;
+    const ax = pos[a] - cx, ay = pos[a + 1] - cy, az = pos[a + 2] - cz;
+    const bx = pos[b] - cx, by = pos[b + 1] - cy, bz = pos[b + 2] - cz;
+    nx += ay * bz - az * by;
+    ny += az * bx - ax * bz;
+    nz += ax * by - ay * bx;
+  }
+  const ln = Math.hypot(nx, ny, nz) || 1;
+  nx /= ln; ny /= ln; nz /= ln;
+  // произвольный вектор, не параллельный нормали
+  let ax = Math.abs(nx) < 0.9 ? 1 : 0, ay = Math.abs(nx) < 0.9 ? 0 : 1, az = 0;
+  let ux = ay * nz - az * ny, uy = az * nx - ax * nz, uz = ax * ny - ay * nx;
+  const lu = Math.hypot(ux, uy, uz) || 1; ux /= lu; uy /= lu; uz /= lu;
+  const vx = ny * uz - nz * uy, vy = nz * ux - nx * uz, vz = nx * uy - ny * ux;
+  const p2 = new Float64Array(n * 2);
+  for (let i = 0; i < n; i++) {
+    const o = loop[i] * 3;
+    const px = pos[o] - cx, py = pos[o + 1] - cy, pz = pos[o + 2] - cz;
+    p2[i * 2] = px * ux + py * uy + pz * uz;
+    p2[i * 2 + 1] = px * vx + py * vy + pz * vz;
+  }
+  return { p2, normal: [nx, ny, nz] };
+}
+
+/** Площадь со знаком (2D). */
+function signedArea(p2) {
+  let s = 0;
+  const n = p2.length / 2;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    s += p2[i * 2] * p2[j * 2 + 1] - p2[j * 2] * p2[i * 2 + 1];
+  }
+  return s * 0.5;
+}
+
+function pointInTri(px, py, ax, ay, bx, by, cx, cy) {
+  const d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+  const d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+  const d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+  const neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+  const pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+  return !(neg && pos);
+}
+
+/**
+ * Отрезание ушей: контур → треугольники (индексы внутри контура).
+ * forbidden(i, j) — диагональ, которую нельзя ставить: такое ребро уже есть в
+ * сетке (перемычка между точками кромки), и лишний треугольник на нём сделал бы
+ * сетку незамкнутой. Такие уши пропускаем, пока есть другие.
+ */
+function earClip(p2, forbidden = null) {
+  const n = p2.length / 2;
+  if (n < 3) return [];
+  const idx = [];
+  for (let i = 0; i < n; i++) idx.push(i);
+  const ccw = signedArea(p2) > 0;
+  const tris = [];
+  const cross3 = (i0, i1, i2) =>
+    (p2[i1 * 2] - p2[i0 * 2]) * (p2[i2 * 2 + 1] - p2[i0 * 2 + 1]) -
+    (p2[i1 * 2 + 1] - p2[i0 * 2 + 1]) * (p2[i2 * 2] - p2[i0 * 2]);
+  let guard = 0;
+  while (idx.length > 3 && guard++ < n * n + 64) {
+    let good = -1, goodA = -1;             // ухо без запрещённой диагонали
+    let bad = -1, badA = -1;               // ухо с запрещённой (крайний случай)
+    for (let i = 0; i < idx.length; i++) {
+      const i0 = idx[(i + idx.length - 1) % idx.length], i1 = idx[i], i2 = idx[(i + 1) % idx.length];
+      const cr = cross3(i0, i1, i2);
+      if (ccw ? cr <= 1e-12 : cr >= -1e-12) continue;      // не выпуклое ухо
+      let inside = false;
+      for (const j of idx) {
+        if (j === i0 || j === i1 || j === i2) continue;
+        if (pointInTri(p2[j * 2], p2[j * 2 + 1],
+              p2[i0 * 2], p2[i0 * 2 + 1], p2[i1 * 2], p2[i1 * 2 + 1], p2[i2 * 2], p2[i2 * 2 + 1])) {
+          inside = true; break;
+        }
+      }
+      if (inside) continue;
+      const area = Math.abs(cr);
+      if (forbidden && forbidden(i0, i2)) {
+        if (area > badA) { badA = area; bad = i; }
+      } else if (area > goodA) {
+        goodA = area; good = i;
+      }
+    }
+    let pick = good >= 0 ? good : bad;
+    if (pick < 0) {                        // вырожденный контур — режем самое «толстое» ухо
+      let best = 0, bestA = -1;
+      for (let i = 0; i < idx.length; i++) {
+        const i0 = idx[(i + idx.length - 1) % idx.length], i1 = idx[i], i2 = idx[(i + 1) % idx.length];
+        const a = Math.abs(cross3(i0, i1, i2));
+        if (a > bestA) { bestA = a; best = i; }
+      }
+      pick = best;
+    }
+    const i0 = idx[(pick + idx.length - 1) % idx.length], i1 = idx[pick], i2 = idx[(pick + 1) % idx.length];
+    tris.push(i0, i1, i2);
+    idx.splice(pick, 1);
+  }
+  if (idx.length === 3) tris.push(idx[0], idx[1], idx[2]);
+  return tris;
+}
+
+/**
+ * Триангуляция контура минимальной суммой диагоналей (динамика по подотрезкам).
+ * Работает прямо в 3D — проецировать контур не нужно, поэтому узкие «перешейки»,
+ * на которых отрезание ушей застревает, разбираются корректно.
+ * forbidden(i, j) — диагональ, которую ставить нельзя (ребро уже есть в сетке).
+ * Возвращает индексы внутри контура или null, если контур нельзя закрыть.
+ */
+function dpTriangulate(loop, pos, forbidden) {
+  const n = loop.length;
+  if (n < 3) return null;
+  if (n > 1000) return null;                    // совсем край: зовём отрезание ушей
+  const d = (i, j) => {
+    const a = loop[i] * 3, b = loop[j] * 3;
+    return Math.hypot(pos[b] - pos[a], pos[b + 1] - pos[a + 1], pos[b + 2] - pos[a + 2]);
+  };
+  const INF = 1e12;
+  const len = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) {
+    len[i * n + i] = 0;
+    for (let j = i + 1; j < n; j++) {
+      const edge = (j === i + 1) || (i === 0 && j === n - 1);   // сторона контура
+      len[i * n + j] = len[j * n + i] =
+        (!edge && forbidden && forbidden(i, j)) ? INF : d(i, j);
+    }
+  }
+  const dp = new Float64Array(n * n).fill(INF);
+  const cut = new Int32Array(n * n).fill(-1);
+  for (let i = 0; i + 1 < n; i++) dp[i * n + i + 1] = 0;
+  for (let span = 2; span < n; span++) {
+    for (let i = 0; i + span < n; i++) {
+      const j = i + span;
+      let best = INF, bestK = -1;
+      for (let k = i + 1; k < j; k++) {
+        const v = dp[i * n + k] + dp[k * n + j] + len[i * n + k] + len[k * n + j];
+        if (v < best) { best = v; bestK = k; }
+      }
+      dp[i * n + j] = best; cut[i * n + j] = bestK;
+    }
+  }
+  if (!isFinite(dp[n - 1]) || dp[0 * n + (n - 1)] >= INF) return null;
+  const tris = [];
+  const stack = [[0, n - 1]];
+  while (stack.length) {
+    const [i, j] = stack.pop();
+    const k = cut[i * n + j];
+    if (k < 0) continue;
+    tris.push(i, k, j);
+    if (k - i > 1) stack.push([i, k]);
+    if (j - k > 1) stack.push([k, j]);
+  }
+  return tris.length ? tris : null;
+}
+
+/**
+ * Убрать помеченные узлы и зашить получившиеся дырки.
+ * Возвращает новый список граней (индексы вершин файла), число дырок и
+ * добавленных треугольников.
+ */
+export function deleteAndFill(topo, index, pos, deleted, report) {
+  const { canon, vk, rep } = topo;
+
+  /* Грани, которые остаются, и кромка. Если кромка проходит через вершину
+     дважды (дыра касается себя — тонкая перемычка), такую вершину тоже убираем
+     и считаем заново: иначе дыру не зашить. */
+  let keep = [], removed = 0, edges = null, extra = 0;
+  for (let pass = 0; pass < 200; pass++) {
+    keep = []; removed = 0;
+    for (let i = 0; i < index.length; i += 3) {
+      const a = canon[index[i]], b = canon[index[i + 1]], c = canon[index[i + 2]];
+      if (a === b || b === c || c === a) { removed++; continue; }
+      if (deleted[a] || deleted[b] || deleted[c]) { removed++; continue; }
+      keep.push(a, b, c);
+    }
+    edges = boundaryEdges(keep, vk);
+    if (!edges.pinch.length) break;
+    let grew = 0;
+    for (const v of edges.pinch) if (!deleted[v]) { deleted[v] = 1; grew++; }
+    extra += grew;
+    if (!grew) break;                    // убирать больше нечего — оставляем как есть
+  }
+  const loops = boundaryLoops(edges.next);
+
+  /* Ориентация заплатки: у замкнутой сетки кромка дыры направлена так, что
+     заплатка обязана идти по ней в обратную сторону. Проверяем честно — по
+     совпадению направленных рёбер с уже существующими (сетка может прийти
+     с несогласованным обходом граней). */
+  const vk2 = vk * 1e6;                       // vk ≤ 60 000: ключи точны в double
+  const dirSet = new Set();
+  for (let i = 0; i < keep.length; i += 3) {
+    const a = keep[i], b = keep[i + 1], c = keep[i + 2];
+    dirSet.add(a * vk2 + b); dirSet.add(b * vk2 + c); dirSet.add(c * vk2 + a);
+  }
+  const patch = [];
+  let added = 0;
+  for (const loop of loops) {
+    const forb = (i, j) => dirSet.has(loop[i] * vk2 + loop[j]) ||
+                           dirSet.has(loop[j] * vk2 + loop[i]);
+    const dp = dpTriangulate(loop, pos, forb);
+    const tri = dp || earClip(flattenLoop(loop, pos).p2, forb);
+    if (report) report.push({ loop: loop.length, dp: dp ? dp.length / 3 : 0, tris: tri.length / 3 });
+    if (!tri.length) continue;
+    // два варианта обхода, берём тот, что не дублирует уже занятые рёбра
+    const score = (flip) => {
+      let dup = 0;
+      for (let i = 0; i < tri.length; i += 3) {
+        const a = loop[tri[i]], b = loop[tri[i + 1]], c = loop[tri[i + 2]];
+        const t = flip ? [a, c, b] : [a, b, c];
+        if (dirSet.has(t[0] * vk2 + t[1])) dup++;
+        if (dirSet.has(t[1] * vk2 + t[2])) dup++;
+        if (dirSet.has(t[2] * vk2 + t[0])) dup++;
+      }
+      return dup;
+    };
+    const flip = score(true) < score(false);
+    for (let i = 0; i < tri.length; i += 3) {
+      const a = loop[tri[i]], b = loop[tri[i + 1]], c = loop[tri[i + 2]];
+      const t = flip ? [a, c, b] : [a, b, c];
+      if (t[0] === t[1] || t[1] === t[2] || t[2] === t[0]) continue;
+      patch.push(t[0], t[1], t[2]);
+      dirSet.add(t[0] * vk2 + t[1]);
+      dirSet.add(t[1] * vk2 + t[2]);
+      dirSet.add(t[2] * vk2 + t[0]);
+      added++;
+    }
+  }
+  const out = new Int32Array((keep.length + patch.length));
+  for (let i = 0; i < keep.length; i++) out[i] = rep[keep[i]];
+  for (let i = 0; i < patch.length; i++) out[keep.length + i] = rep[patch[i]];
+  return { index: out, removedFaces: removed, holes: loops.length, addedFaces: added, extraDeleted: extra };
+}
+
+/** Перед экспортом: выкинуть вершины, на которые не ссылается ни одна грань. */
+export function compactMesh(positions, index) {
+  const nv = positions.length / 3;
+  const used = new Int32Array(nv).fill(-1);
+  let n = 0;
+  for (let i = 0; i < index.length; i++) if (used[index[i]] < 0) used[index[i]] = n++;
+  const p = new Float32Array(n * 3);
+  for (let v = 0; v < nv; v++) {
+    const u = used[v];
+    if (u < 0) continue;
+    p[u * 3] = positions[v * 3];
+    p[u * 3 + 1] = positions[v * 3 + 1];
+    p[u * 3 + 2] = positions[v * 3 + 2];
+  }
+  const idx = new Int32Array(index.length);
+  for (let i = 0; i < index.length; i++) idx[i] = used[index[i]];
+  return { positions: p, index: idx, dropped: nv - n };
 }

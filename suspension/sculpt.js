@@ -7,17 +7,25 @@
    2. Кнопка «Сгладить» прогоняет диффузию по рёбрам внутри области (кромка
       области и всё остальное не двигаются). Нажатий можно делать сколько
       угодно — каждое накапливается, «Отменить» откатывает шаг.
-   3. «Скачать 3MF» отдаёт кузов файлом прямо из браузера.
+   3. Кнопка «Удалять точки» переключает кисть в ластик: закрашенные красным
+      точки убираются, а на месте дырки поверхность зашивается треугольниками
+      по её же кромке — плоскость сама соединяется с ближайшими оставшимися
+      точками (см. meshops.deleteAndFill). Один штрих = один шаг «Отменить».
+   4. «Скачать 3MF» отдаёт кузов файлом прямо из браузера.
 
-   Топология не меняется: ни булевых операций, ни новых треугольников — только
-   сдвиг вершин. Поэтому сетка остаётся замкнутой, а фары, эмблема и каналы в
-   арках остаются там, где были: их просто не надо закрашивать.
+   Сглаживание топологию не меняет: ни булевых операций, ни новых треугольников
+   — только сдвиг вершин. Удаление убирает точки и перерезает грани, но новые
+   точки не появляются: заплатка строится из уже существующих вершин, поэтому
+   сетка остаётся замкнутой.
 
    Всё в единицах модели (1 ед. = 0.17 мм печати, U = 5.8824 ед./мм).
    ============================================================ */
 import * as THREE from 'three';
 import { meshTo3mf, downloadBytes } from './export3mf.js';
-import { buildTopology, freeMask, smoothDiffuse, boundaryFalloff, paintBall, expandToVertices } from './meshops.js';
+import {
+  buildTopology, freeMask, smoothDiffuse, boundaryFalloff, paintBall,
+  expandToVertices, deleteAndFill, compactMesh
+} from './meshops.js';
 
 const MAXSTEPS = 600;   // итераций за одно нажатие при «Степень» 100 %
 const LAMBDA   = 0.5;   // доля шага диффузии
@@ -39,6 +47,8 @@ export function initSculpt(opts) {
 
   const pos = Float32Array.from(pos0);
   const reg = new Uint8Array(vk);
+  const dead = new Uint8Array(vk);        // узлы, убранные ластиком
+  let delTotal = 0;                       // сколько узлов удалено всего
   let free = new Uint8Array(vk);
   let regionN = 0;
 
@@ -58,8 +68,9 @@ export function initSculpt(opts) {
   function paintMarks() {
     for (let v = 0; v < vk; v++) {
       const k = v * 3;
-      if (reg[v]) { CANON_COL[k] = 0.34; CANON_COL[k + 1] = 1.0; CANON_COL[k + 2] = 0.80; }
-      else        { CANON_COL[k] = 1;    CANON_COL[k + 1] = 1;    CANON_COL[k + 2] = 1; }
+      if (dead[v])     { CANON_COL[k] = 1.0;  CANON_COL[k + 1] = 0.28; CANON_COL[k + 2] = 0.30; }
+      else if (reg[v]) { CANON_COL[k] = 0.34; CANON_COL[k + 1] = 1.0;  CANON_COL[k + 2] = 0.80; }
+      else             { CANON_COL[k] = 1;    CANON_COL[k + 1] = 1;    CANON_COL[k + 2] = 1;    }
     }
     repaintColors();
   }
@@ -75,8 +86,14 @@ export function initSculpt(opts) {
 
   /* ---------- история ---------- */
   const hist = [];
-  function pushHist() {
-    hist.push({ pos: Float32Array.from(pos), reg: reg.slice(), n: regionN, index: liveIndex });
+  function snapshot() {
+    return {
+      pos: Float32Array.from(pos), reg: reg.slice(), dead: dead.slice(),
+      n: regionN, del: delTotal, index: liveIndex
+    };
+  }
+  function pushHist(snap) {
+    hist.push(snap || snapshot());
     if (hist.length > 15) hist.shift();
   }
   function setIndex(ix) {
@@ -90,16 +107,66 @@ export function initSculpt(opts) {
   let brushMM = 6;
   let amount = 25;          // «степень» в процентах: сколько итераций за нажатие
   let painting = false;
+  let eraseOn = false;      // ластик вместо закраски
+  let strokeSnap = null;    // снимок для «Отменить» — до начала штриха
+  let strokeDel = 0;        // сколько удалено в текущем штрихе
 
-  function stamp(clientX, clientY) {
+  /** точка под курсором в локальных координатах кузова */
+  function hit(clientX, clientY) {
     ndc.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
     ray.setFromCamera(ndc, camera);
     const hits = ray.intersectObject(mesh, false);
-    if (!hits.length) return 0;
-    const p = mesh.worldToLocal(hits[0].point.clone());
-    const added = paintBall(topo, reg, [p.x, p.y, p.z], brushMM * U, pos);
+    if (!hits.length) return null;
+    return mesh.worldToLocal(hits[0].point.clone());
+  }
+
+  function stamp(clientX, clientY) {
+    const p = hit(clientX, clientY);
+    if (!p) return 0;
+    const added = paintBall(topo, reg, [p.x, p.y, p.z], brushMM * U, pos, dead);
     if (added) { regionN += added; paintMarks(); syncInfo(); }
     return added;
+  }
+
+  /* ---------- ластик: пометить точки под кистью ---------- */
+  function eraseStamp(clientX, clientY) {
+    const p = hit(clientX, clientY);
+    if (!p) return 0;
+    const r2 = (brushMM * U) * (brushMM * U);
+    let n = 0;
+    for (let v = 0; v < vk; v++) {
+      if (dead[v]) continue;
+      const o = v * 3;
+      const dx = pos[o] - p.x, dy = pos[o + 1] - p.y, dz = pos[o + 2] - p.z;
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      dead[v] = 1; delTotal++; n++;
+      if (reg[v]) { reg[v] = 0; regionN--; }
+    }
+    if (n) { strokeDel += n; paintMarks(); syncInfo(); }
+    return n;
+  }
+
+  /* ---------- зашивка: убрать точки и закрыть дырку ---------- */
+  function applyErase(n) {
+    if (!n) return;
+    const res = deleteAndFill(topo, liveIndex, pos, dead);
+    setIndex(res.index);
+    // зашивка могла убрать ещё несколько точек (кромка касалась себя) и снять
+    // какие-то из закрашенных — пересчитываем по факту
+    let regNow = 0, delNow = 0;
+    for (let v = 0; v < vk; v++) { if (reg[v]) regNow++; if (dead[v]) delNow++; }
+    regionN = regNow; delTotal = delNow;
+    paintMarks();
+    flush();
+    if (info) {
+      info.textContent = `удалено точек: ${n}` +
+        (res.extraDeleted ? ` (+${res.extraDeleted} на кромке)` : '') +
+        ` · убрано граней ${res.removedFaces} · зашито дырок: ${res.holes} ` +
+        `(${res.addedFaces} треугольников) · поверхность снова замкнута`;
+    } else {
+      syncInfo();
+    }
+    return res;
   }
 
   /* ---------- «Сгладить»: мягкая диффузия по рёбрам ---------- */
@@ -123,21 +190,47 @@ export function initSculpt(opts) {
   /* ---------- интерфейс ---------- */
   const $ = (id) => document.getElementById(id);
   const btnMode  = $('sc-mode');
+  const btnDel   = $('sc-del');
   const rows     = Array.from(document.querySelectorAll('.sc-row'));
   const hint     = $('sc-hint');
   const info     = $('sc-info');
+  const HINT_SMOOTH = hint ? hint.innerHTML : '';
+  const HINT_ERASE =
+    'Левой кнопкой <b>сотрите</b> лишние точки — они подсветятся красным и уйдут по ' +
+    'отпусканию кнопки, а дырка зашьётся треугольниками по своей кромке: поверхность ' +
+    'сама соединится с ближайшими оставшимися точками. Правой — вращать камеру, ' +
+    'колесом — приблизить. «Отменить» возвращает целый штрих.';
   let on = false;
 
   function syncInfo(note) {
     if (!info) return;
     if (note) { info.textContent = note; return; }
-    if (regionN) {
+    const faces = liveIndex.length / 3;
+    if (eraseOn) {
+      info.textContent = `ластик: за один штрих удаляется всё под кистью ` +
+        `(${brushMM} мм) · в сетке ${faces} граней`;
+    } else if (regionN) {
       const pct = (100 * regionN / vk).toFixed(0);
       info.textContent = `выбрано ${regionN} вершин (${pct} %), ` +
         `за нажатие ${Math.max(20, Math.round(amount / 100 * MAXSTEPS))} итераций`;
     } else {
       info.textContent = 'область не выбрана';
     }
+  }
+
+  function setErase(v) {
+    eraseOn = v;
+    if (btnDel) {
+      btnDel.classList.toggle('on', v);
+      btnDel.textContent = v ? '■ Закончить удаление' : '⌫ Удалять точки';
+    }
+    const amtRow = $('sc-amtrow'), goBtn = $('sc-go');
+    if (amtRow) amtRow.classList.toggle('hd', v);
+    if (goBtn) goBtn.classList.toggle('hd', v);
+    if (hint) hint.innerHTML = v ? HINT_ERASE : HINT_SMOOTH;
+    if (v && !on) setMode(true);
+    paintMarks();
+    syncInfo();
   }
 
   function setMode(v) {
@@ -147,8 +240,13 @@ export function initSculpt(opts) {
       btnMode.textContent = on ? '■ Закончить выбор' : '✎ Выбрать участок';
     }
     rows.forEach(r => r.classList.toggle('hd', !on));
+    if (on) {
+      const amtRow = $('sc-amtrow'), goBtn = $('sc-go');
+      if (amtRow) amtRow.classList.toggle('hd', eraseOn);
+      if (goBtn) goBtn.classList.toggle('hd', eraseOn);
+    }
     if (hint) hint.classList.toggle('hd', !on);
-    renderer.domElement.style.cursor = on ? 'crosshair' : '';
+    renderer.domElement.style.cursor = on ? (eraseOn ? 'cell' : 'crosshair') : '';
     const MB = THREE.MOUSE;
     if (on) {
       controls.mouseButtons = { LEFT: null, MIDDLE: MB.DOLLY, RIGHT: MB.ROTATE };
@@ -156,6 +254,7 @@ export function initSculpt(opts) {
     } else {
       controls.mouseButtons = { LEFT: MB.ROTATE, MIDDLE: MB.DOLLY, RIGHT: MB.PAN };
       controls.touches = { ONE: MB.ROTATE, TWO: MB.DOLLY_PAN };
+      if (eraseOn) setErase(false);
     }
   }
 
@@ -165,20 +264,37 @@ export function initSculpt(opts) {
     if (!on || e.button !== 0) return;
     painting = true;
     try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
-    stamp(e.clientX, e.clientY);
+    if (eraseOn) { strokeDel = 0; strokeSnap = snapshot(); eraseStamp(e.clientX, e.clientY); }
+    else stamp(e.clientX, e.clientY);
   });
-  cvs.addEventListener('pointermove', e => { if (on && painting) stamp(e.clientX, e.clientY); });
-  const stop = () => { painting = false; };
+  cvs.addEventListener('pointermove', e => {
+    if (!on || !painting) return;
+    if (eraseOn) eraseStamp(e.clientX, e.clientY);
+    else stamp(e.clientX, e.clientY);
+  });
+  const stop = () => {
+    if (!painting) return;
+    painting = false;
+    if (eraseOn && strokeDel) {
+      const n = strokeDel;
+      strokeDel = 0;
+      pushHist(strokeSnap);           // «Отменить» вернёт сетку и все точки до штриха
+      strokeSnap = null;
+      applyErase(n);
+    }
+  };
   cvs.addEventListener('pointerup', stop);
   cvs.addEventListener('pointercancel', stop);
   cvs.addEventListener('pointerleave', stop);
 
   if (btnMode) btnMode.addEventListener('click', () => setMode(!on));
+  if (btnDel) btnDel.addEventListener('click', () => setErase(!eraseOn));
 
   const brushEl = $('sc-brush');
   if (brushEl) brushEl.addEventListener('input', () => {
     brushMM = +brushEl.value;
     $('sc-brushv').textContent = brushMM + ' мм';
+    syncInfo();
   });
   const amtEl = $('sc-amt');
   if (amtEl) amtEl.addEventListener('input', () => {
@@ -194,6 +310,7 @@ export function initSculpt(opts) {
     const h = hist.pop();
     if (!h) { syncInfo('отменять нечего'); return; }
     pos.set(h.pos); reg.set(h.reg); regionN = h.n;
+    dead.set(h.dead); delTotal = h.del;
     if (h.index !== liveIndex) setIndex(h.index);
     paintMarks(); free = freeMask(topo, reg);
     flush(); syncInfo();
@@ -208,9 +325,11 @@ export function initSculpt(opts) {
 
   const saveBtn = $('sc-save');
   if (saveBtn) saveBtn.addEventListener('click', () => {
-    // экспорт по исходной сетке: те же вершины и индексы, сдвинуты только
-    // координаты — файл остаётся такой же замкнутой сеткой, как исходник
-    const bytes = meshTo3mf(src, liveIndex, {
+    // экспорт: если точки удаляли — сначала выбрасываем осиротевшие вершины,
+    // чтобы в файле не осталось ни одной неиспользованной точки
+    const cmp = compactMesh(src, liveIndex);
+    const positions = cmp.positions, index = cmp.index;
+    const bytes = meshTo3mf(positions, index, {
       name: 'Кузов',
       meta: 'VW Tayron: кузов со сглаженным участком (печать 17 %)'
     });
@@ -218,8 +337,9 @@ export function initSculpt(opts) {
     const res = downloadBytes(bytes, name);
     if (info) {
       info.innerHTML = `готово: <a href="${res.url}" download="${name}" style="color:var(--acc)">` +
-        `скачать ${name}</a> · ${(bytes.length / 1048576).toFixed(1)} МБ. ` +
-        'Если браузер не начал скачивание сам — нажмите ссылку.';
+        `скачать ${name}</a> · ${(bytes.length / 1048576).toFixed(1)} МБ` +
+        (cmp.dropped ? ` · ${cmp.dropped} вершин без граней выкинуто` : '') +
+        '. Если браузер не начал скачивание сам — нажмите ссылку.';
     }
   });
 
@@ -227,11 +347,15 @@ export function initSculpt(opts) {
 
   return {
     get mode() { return on; },
+    get erasing() { return eraseOn; },
     setMode,
+    setErase,
     get regionCount() { return regionN; },
+    get deletedCount() { return delTotal; },
     stats: () => ({
       vertices: vk, faces: liveIndex.length / 3,
-      sourceVertices: count, welded: topo.welded
+      sourceVertices: count, welded: topo.welded,
+      deleted: delTotal, facesNow: liveIndex.length / 3
     })
   };
 }
