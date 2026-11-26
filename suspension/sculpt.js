@@ -545,17 +545,23 @@ export function initSculpt(opts) {
        быть того же размера, иначе атрибуты разъезжаются и поверхность чёрная:
        flatShading/vertexColors читают их по числу вершин. computeVertexNormals
        переиспользует СТАРЫЙ буфер нормалей, поэтому его надо удалить. */
-    if (col.length !== attr.count * 3) {
-      const next = new Float32Array(attr.count * 3).fill(1);
-      next.set(col.subarray(0, Math.min(col.length, next.length)));
-      col = next;
-      geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    /* Цвет тоже обязан совпадать с числом вершин: короткий буфер атрибута
+       читается вне длины — новые узлы (борозда, вставка точки) становились
+       чёрными. Сверяем не длину массива, а сам атрибут геометрии. */
+    const cAttr = geom.attributes.color;
+    if (!cAttr || cAttr.count !== attr.count || col.length !== attr.count * 3) {
+      if (col.length !== attr.count * 3) {
+        const next = new Float32Array(attr.count * 3).fill(1);
+        next.set(col.subarray(0, Math.min(col.length, next.length)));
+        col = next;
+      }
       if (CANON_COL.length < vk * 3) {
         const nc = new Float32Array(vk * 3).fill(1);
         nc.set(CANON_COL.subarray(0, Math.min(CANON_COL.length, nc.length)));
         CANON_COL = nc;
       }
-      repaintColors();
+      geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      paintMarks();                 // залить цвета по текущему выделению
     }
     if (wireOn) {
       wireGeo.attributes.position.needsUpdate = true;
@@ -1226,6 +1232,7 @@ export function initSculpt(opts) {
       }
       count += kNew; vk += kNew;
       col = newCol;
+      geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
 
       const ni = new Int32Array(liveIndex.length + 3 * kNew * 2);
       let w = 0;
