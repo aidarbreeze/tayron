@@ -146,6 +146,11 @@ def main():
                     help='ширина плавного перехода у контура участка, мм')
     ap.add_argument('--squash-ztaper-mm', type=float, default=0.9,
                     help='смягчение у верхней/нижней границы участка, мм')
+    ap.add_argument('--squash-y-max', type=float, default=17.0,
+                    help='докуда по |y| тянем панель (мм); меньше 21 — подрезать бока')
+    ap.add_argument('--squash-fill-mm', type=float, default=99.0,
+                    help='не заливать вершины, которые глубже этого от плоскости '
+                         '(0.8 — только мелкий рельеф, 99 — заливать всё)')
     ap.add_argument('--squash-mask-close', type=int, default=1,
                     help='насколько смыкать редкие мазки кисти в маске (шагов по 0.5 мм)')
     a = ap.parse_args()
@@ -214,7 +219,7 @@ def main():
         ii = np.clip(((py - y0) / step).astype(int), 0, ny - 1)
         jj = np.clip(((pz - z0) / step).astype(int), 0, nz - 1)
         # участок: контур закрашенного, только ниша (не рамка, не фонари, не эмблема)
-        inside = ((np.abs(py) < 21.0) & (pz > 22.3) & (pz < 30.6)
+        inside = ((np.abs(py) < a.squash_y_max + 0.001) & (pz > 22.3) & (pz < 30.6)
                   & (V[:, 0] < (a.squash_mm + 0.9) * U)
                   & (V[:, 0] > (a.squash_mm - a.squash_depth_mm) * U)
                   & M[ii, jj])
@@ -227,9 +232,17 @@ def main():
         # вес сдвига: 1 в глубине участка, плавно к нулю у контура закраски и у границ
         w = (_ss(dist[ii, jj] / max(a.squash_falloff_mm, 1e-6))
              * _ss((30.6 - pz) / zt) * _ss((pz - 22.3) / zt)
-             * _ss((21.0 - np.abs(py)) / 1.4)
+             * _ss((a.squash_y_max - np.abs(py)) / 1.4)
              * _ss(((a.squash_mm + 0.9) * U - V[:, 0]) / (0.7 * U))
              * _ss((V[:, 0] - (a.squash_mm - a.squash_depth_mm) * U) / (1.5 * U)))
+        # у самой кромки не поднимаем то, что лежит глубоко: иначе на торцах, где
+        # поверхность ныряет в карман, панель встаёт бортиком над сотами.
+        # В глубине участка (w = 1) это не действует — там доска ровная.
+        if a.squash_fill_mm < 90:
+            depth_mm = (L - V[:, 0]) / U
+            guard = _ss((a.squash_fill_mm - depth_mm) / 0.6)
+            core = _ss((w - 0.90) / 0.10)
+            w = w * (core + (1.0 - core) * guard)
         w = w * inside
 
         # 2. сдвиг к плоскости. Остаток (при --squash-keep > 0) берётся от поля,
