@@ -50,6 +50,7 @@ export function initSculpt(opts) {
   let topo = buildTopology(src, liveIndex);
   let vk = topo.vk, pos0 = topo.pos0, canon = topo.canon;
   let topoDirty = false;                  // топология правилась (добавлены точки)
+  let wireDirty = false;                  // индексы сетки-оверлея устарели
 
   const posInit = Float32Array.from(pos0);   // исходные координаты — для «Сбросить»
   let pos = Float32Array.from(pos0);
@@ -177,7 +178,7 @@ export function initSculpt(opts) {
      делит её на три — новой поверхности не появляется, точка всегда лежит на
      кузове. Слишком близко к вершине не ставим: получились бы вырожденные
      треугольники. */
-  function insertPointAt(faceIdx, p) {
+  function insertPointAt(faceIdx, p, doFlips = true) {
     if (!(faceIdx >= 0) || faceIdx * 3 + 2 >= liveIndex.length) return { ok: false, why: 'грань не найдена' };
     const b0 = faceIdx * 3;
     const i0 = liveIndex[b0], i1 = liveIndex[b0 + 1], i2 = liveIndex[b0 + 2];
@@ -206,10 +207,8 @@ export function initSculpt(opts) {
     const nv = count;                      // индекс новой вершины файла
     const newSrc = new Float32Array((count + 1) * 3);
     newSrc.set(src); newSrc[nv * 3] = px; newSrc[nv * 3 + 1] = py; newSrc[nv * 3 + 2] = pz;
-    src = newSrc;
-    attr = new THREE.BufferAttribute(src, 3);
-    geom.setAttribute('position', attr);
     count += 1;
+    applySrc(newSrc);
     const newCol = new Float32Array(count * 3).fill(1);
     newCol.set(col); col = newCol;
     geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
@@ -220,6 +219,8 @@ export function initSculpt(opts) {
     ni[b0 + 3] = i1; ni[b0 + 4] = i2; ni[b0 + 5] = nv;
     ni[b0 + 6] = i2; ni[b0 + 7] = i0; ni[b0 + 8] = nv;
     ni.set(liveIndex.subarray(b0 + 3), b0 + 9);
+    /* притягиваем ближайшие узлы к новой точке (перевороты по Делоне) */
+    if (doFlips) attachNeighbours(nv, 8, ni);
     setIndex(ni);
 
     resizeNodeArrays(vk + 1);
@@ -234,6 +235,112 @@ export function initSculpt(opts) {
     added[node] = 1;
     topoDirty = true; nrm = null;
     return { ok: true, node };
+  }
+
+  /* ---------- привязка соседей: локальные перевороты рёбер ----------
+     После расщепления грани на три точка соединяется только с вершинами этой
+     грани; если кликнули близко к вершине или ребру, два треугольника выходят
+     «иголками» — на экране это выглядит, будто плоскость поехала. Поэтому
+     сразу после вставки переворачиваем рёбра по критерию Делоне: новая точка
+     «притягивает» к себе ближайшие узлы, иголки исчезают. Работаем только в
+     окрестности (два кольца вокруг новой точки), чтобы не сканировать всю
+     сетку на каждый переворот. */
+  const crossN = (px, py, pz, qx, qy, qz) => [py * qz - pz * qy, pz * qx - px * qz, px * qy - py * qx];
+  function triNormal(i0, i1, i2, P) {
+    const a = i0 * 3, b = i1 * 3, c = i2 * 3;
+    return crossN(P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2],
+                  P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]);
+  }
+  function inCircle(a, b, c, d, P) {
+    /* d внутри описанной окружности abc — считаем в плоскости abc */
+    const e1 = [P[b * 3] - P[a * 3], P[b * 3 + 1] - P[a * 3 + 1], P[b * 3 + 2] - P[a * 3 + 2]];
+    const e2 = [P[c * 3] - P[a * 3], P[c * 3 + 1] - P[a * 3 + 1], P[c * 3 + 2] - P[a * 3 + 2]];
+    let n = crossN(e1[0], e1[1], e1[2], e2[0], e2[1], e2[2]);
+    const ln = Math.hypot(n[0], n[1], n[2]);
+    if (!ln) return false;
+    n = [n[0] / ln, n[1] / ln, n[2] / ln];
+    let u = e1.slice();
+    const lu = Math.hypot(u[0], u[1], u[2]) || 1;
+    u = [u[0] / lu, u[1] / lu, u[2] / lu];
+    const v = crossN(n[0], n[1], n[2], u[0], u[1], u[2]);
+    const p2 = (i) => {
+      const dx = P[i * 3] - P[a * 3], dy = P[i * 3 + 1] - P[a * 3 + 1], dz = P[i * 3 + 2] - P[a * 3 + 2];
+      return [dx * u[0] + dy * u[1] + dz * u[2], dx * v[0] + dy * v[1] + dz * v[2]];
+    };
+    const A = [0, 0], B = p2(b), C = p2(c), D = p2(d);
+    const adx = A[0] - D[0], ady = A[1] - D[1];
+    const bdx = B[0] - D[0], bdy = B[1] - D[1];
+    const cdx = C[0] - D[0], cdy = C[1] - D[1];
+    const ab = adx * bdy - bdx * ady;
+    const bc = bdx * cdy - cdx * bdy;
+    const ca = cdx * ady - adx * cdy;
+    const al = adx * adx + ady * ady, bl = bdx * bdx + bdy * bdy, cl = cdx * cdx + cdy * cdy;
+    const det = al * bc + bl * ca + cl * ab;
+    const area = (B[0] - A[0]) * (C[1] - A[1]) - (C[0] - A[0]) * (B[1] - A[1]);
+    return (area > 0 ? det > 0 : det < 0);
+  }
+  /** рёбра вокруг новой вершины: переворот, если он улучшает треугольники */
+  function attachNeighbours(nvFile, maxFlips = 8, idx = liveIndex) {
+    const key = (a, b) => (a < b ? a * 1e6 + b : b * 1e6 + a);
+    /* 1) кольцо вокруг новой точки (один проход по сетке) */
+    const ring = new Set([nvFile]);
+    for (let i = 0; i < idx.length; i += 3) {
+      if (idx[i] === nvFile || idx[i + 1] === nvFile || idx[i + 2] === nvFile) {
+        ring.add(idx[i]); ring.add(idx[i + 1]); ring.add(idx[i + 2]);
+      }
+    }
+    /* 2) грани, задевающие это кольцо, и карта их рёбер (второй проход) */
+    const faces = [];
+    for (let i = 0; i < idx.length; i += 3) {
+      if (ring.has(idx[i]) || ring.has(idx[i + 1]) || ring.has(idx[i + 2])) faces.push(i);
+    }
+    const emap = new Map();
+    const addEdges = (f, sign) => {
+      for (let k = 0; k < 3; k++) {
+        const a = idx[f + k], b = idx[f + (k + 1) % 3];
+        const kk = key(a, b);
+        if (sign > 0) { const e = emap.get(kk); if (e) e.push(f); else emap.set(kk, [f]); }
+        else { const e = emap.get(kk); if (e) { const j = e.indexOf(f); if (j >= 0) e.splice(j, 1); if (!e.length) emap.delete(kk); } }
+      }
+    };
+    for (const f of faces) addEdges(f, 1);
+    const setTri = (f, a, b, c) => {
+      addEdges(f, -1);
+      idx[f] = a; idx[f + 1] = b; idx[f + 2] = c;
+      addEdges(f, 1);
+    };
+
+    let flips = 0;
+    for (let round = 0; round < maxFlips * 3 && flips < maxFlips; round++) {
+      let done = false;
+      const mine = [];
+      for (const f of faces) {
+        if (idx[f] === nvFile || idx[f + 1] === nvFile || idx[f + 2] === nvFile) mine.push(f);
+      }
+      for (const f of mine) {
+        const k = idx[f] === nvFile ? 0 : (idx[f + 1] === nvFile ? 1 : 2);
+        const a = idx[f + (k + 1) % 3], b = idx[f + (k + 2) % 3];
+        const near = emap.get(key(a, b)) || [];
+        const other = near.find((g) => g !== f);
+        if (other === undefined) continue;
+        const x = idx[other], y = idx[other + 1], z = idx[other + 2];
+        const c = x !== a && x !== b ? x : (y !== a && y !== b ? y : z);
+        if (c === a || c === b || c === nvFile) continue;
+        if (!inCircle(a, b, c, nvFile, src)) continue;
+        const nb = triNormal(x, y, z, src);
+        const n1 = triNormal(nvFile, a, c, src), n2 = triNormal(nvFile, c, b, src);
+        const l1 = Math.hypot(...n1), l2 = Math.hypot(...n2);
+        if (l1 < 1e-12 || l2 < 1e-12) continue;             // вырожденные — не трогаем
+        if (n1[0] * nb[0] + n1[1] * nb[1] + n1[2] * nb[2] <= 0) continue;
+        if (n2[0] * nb[0] + n2[1] * nb[1] + n2[2] * nb[2] <= 0) continue;
+        setTri(f, nvFile, a, c);
+        setTri(other, nvFile, c, b);
+        flips++; done = true;
+        break;
+      }
+      if (!done) break;
+    }
+    return flips;
   }
 
   /* ---------- «лицевые» узлы: только та поверхность, что видна с камеры ---------- */
@@ -253,6 +360,7 @@ export function initSculpt(opts) {
       return;
     }
     ptMsg = null;
+    paintMarks();               // у новой вершины цвет по умолчанию — вернуть подсветку области
     lastPt = h.p;
     addedTotal += 1;
     /* топологию пересобираем один раз — по отпусканию кнопки (см. stop) */
@@ -312,7 +420,7 @@ export function initSculpt(opts) {
   /* ---------- сетка тонкими чёрными линиями ---------- */
   let wire = null, wireOn = false;
   const wireGeo = new THREE.BufferGeometry();
-  wireGeo.setAttribute('position', new THREE.BufferAttribute(src, 3));
+  wireGeo.setAttribute('position', attr);      // общий атрибут с геометрией
   function rebuildWire() {
     if (!wireOn) return;
     const seen = new Set();
@@ -384,13 +492,27 @@ export function initSculpt(opts) {
   function flush(withNormals = true) {
     expandToVertices(topo, pos, src);
     attr.needsUpdate = true;
-    if (wireOn) wireGeo.attributes.position.needsUpdate = true;
+    if (wireOn) {
+      wireGeo.attributes.position.needsUpdate = true;
+      if (wireDirty) { wireDirty = false; rebuildWire(); }
+    }
     if (withNormals) {
       geom.computeVertexNormals();
       geom.computeBoundingSphere();
       geom.computeBoundingBox();
       if (wireOn) wireGeo.computeBoundingSphere();
     }
+  }
+
+  /** Заменить координатный массив целиком и перепривязать ВСЕ атрибуты.
+      Иначе у сетки-оверлея остаётся старый буфер — после вставки точки на
+      экране получается мусор из линий к несуществующим вершинам. */
+  function applySrc(next) {
+    src = next;
+    attr = new THREE.BufferAttribute(src, 3);
+    geom.setAttribute('position', attr);
+    wireGeo.setAttribute('position', attr);     // тот же атрибут
+    wireDirty = true;                           // сетку пересоберём один раз — в flush()
   }
 
   /* ---------- история ---------- */
@@ -412,16 +534,14 @@ export function initSculpt(opts) {
   function setIndex(ix) {
     liveIndex = ix;
     geom.setIndex(new THREE.BufferAttribute(new Uint32Array(ix), 1));
-    if (wireOn) rebuildWire();
+    wireDirty = true;                       // пересоберём один раз, в flush()
   }
   function restore(s) {
     const T = s.T;
     if (T && (T.src !== src || T.count !== count || T.index !== liveIndex)) {
       /* точка вставки добавляла вершину — возвращаем и геометрию, и топологию */
-      src = Float32Array.from(T.src);
       count = T.count;
-      attr = new THREE.BufferAttribute(src, 3);
-      geom.setAttribute('position', attr);
+      applySrc(Float32Array.from(T.src));
       col = new Float32Array(count * 3).fill(1);
       geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
       setIndex(Uint32Array.from(T.index));
@@ -570,7 +690,62 @@ export function initSculpt(opts) {
   }
 
   /* ---------- 4. фигура ---------- */
+  /** Сгустить сетку в пятне кисти: расщепляем грани, у которых ребро длиннее
+      шага, пока в пятне не станет достаточно узлов. Потом эти узлы и вдавливаем
+      — фигура получается жёсткой, а не «размазанной» по трём большим граням. */
+  function refineAt(center, radius, spacing, maxAdd = 260) {
+    const r2 = radius * radius, s2 = spacing * spacing;
+    const maxEdge2 = (i0, i1, i2) => {
+      const e = (a, b) => {
+        const dx = src[a * 3] - src[b * 3], dy = src[a * 3 + 1] - src[b * 3 + 1], dz = src[a * 3 + 2] - src[b * 3 + 2];
+        return dx * dx + dy * dy + dz * dz;
+      };
+      return Math.max(e(i0, i1), e(i1, i2), e(i2, i0));
+    };
+    const cen = (i0, i1, i2) => [
+      (src[i0 * 3] + src[i1 * 3] + src[i2 * 3]) / 3,
+      (src[i0 * 3 + 1] + src[i1 * 3 + 1] + src[i2 * 3 + 1]) / 3,
+      (src[i0 * 3 + 2] + src[i1 * 3 + 2] + src[i2 * 3 + 2]) / 3];
+    const list = [];
+    for (let f = 0; f < liveIndex.length / 3; f++) {
+      const b = f * 3;
+      const i0 = liveIndex[b], i1 = liveIndex[b + 1], i2 = liveIndex[b + 2];
+      if (maxEdge2(i0, i1, i2) <= s2) continue;
+      const c = cen(i0, i1, i2);
+      const d2 = (c[0] - center[0]) ** 2 + (c[1] - center[1]) ** 2 + (c[2] - center[2]) ** 2;
+      if (d2 > r2) continue;
+      list.push(f);
+    }
+    let added = 0;
+    while (list.length && added < maxAdd) {
+      const f = list.shift();
+      const b = f * 3;
+      if (b + 2 >= liveIndex.length) continue;
+      const i0 = liveIndex[b], i1 = liveIndex[b + 1], i2 = liveIndex[b + 2];
+      if (maxEdge2(i0, i1, i2) <= s2) continue;
+      const c = cen(i0, i1, i2);
+      const d2 = (c[0] - center[0]) ** 2 + (c[1] - center[1]) ** 2 + (c[2] - center[2]) ** 2;
+      if (d2 > r2) continue;
+      const res = insertPointAt(f, c, false);      // в сгущении иголок нет — перевороты не нужны
+      if (!res.ok) continue;
+      added++;
+      for (let k = 0; k < list.length; k++) if (list[k] > f) list[k] += 2;
+      list.push(f, f + 1, f + 2);
+    }
+    if (added) {
+      ensureTopo();
+      nrm = null;
+      paintMarks();
+      flush();
+    }
+    return added;
+  }
+
   function shapeAt(c, sign) {
+    const brush = brushR();
+    /* 1) в месте касания строим точки по размеру кисти … */
+    const spacing = Math.max(brush / 4.5, 0.10 * U);
+    const refined = refineAt(c, brush * 1.15, spacing);
     const n = getNormals();
     let nx = 0, ny = 0, nz = 0, wsum = 0;
     const R = brushR(), r2 = R * R;
@@ -586,9 +761,11 @@ export function initSculpt(opts) {
     else { nx = 0; ny = 0; nz = 1; }
     const shape = {
       kind: shapeKind, center: c, n: [nx, ny, nz],
-      size: { r: R, h: Math.max(R * 0.8, depthD()), a: R * 0.8, b: R * 0.8 }
+      size: { r: R, h: Math.max(R * 0.8, depthD()), a: R * 0.8, b: R * 0.8 },
+      band: Math.max(R * 0.12, spacing * 0.5)      // узкая кромка — штамп жёсткий
     };
-    return imprintShape(topo, pos, shape, sign * depthD(), n, block || dead);
+    const res = imprintShape(topo, pos, shape, sign * depthD(), n, block || dead);
+    return { ...res, refined };
   }
   function shapeStamp(clientX, clientY, sign) {
     const c = hitPoint(clientX, clientY);
@@ -767,15 +944,19 @@ export function initSculpt(opts) {
       'своей кромке — поверхность сама соединится с ближайшими оставшимися точками.',
     pen: 'Левой кнопкой <b>ведите по поверхности</b>: под пером остаётся валик ' +
       'высотой «Глубина» и шириной «Кисть». С зажатым <b>Shift</b> — канавка (внутрь).',
-    shape: 'Левой кнопкой <b>поставьте фигуру</b> на кузов — она вдавится в ' +
-      'поверхность (● сфера / ▮ цилиндр / ■ куб, размер — «Кисть», глубина — ' +
-      '«Глубина»). С зажатым <b>Shift</b> — купол наружу.',
+    shape: 'Левой кнопкой <b>поставьте фигуру</b> на кузов (● сфера / ▮ цилиндр / ' +
+      '■ куб, размер — «Кисть», глубина — «Глубина»). В пятне касания сетка сначала ' +
+      'сгущается — добавляются точки по размеру кисти, — а потом эти точки ' +
+      'вдавливаются на полную глубину: штамп получается жёстким, с плоским дном и ' +
+      'резкой кромкой. С зажатым <b>Shift</b> — купол наружу.',
     measure: 'Два клика по поверхности — расстояние в мм (и разница по осям). ' +
       'Третий клик начинает новую пару.',
     point: '<b>Клик или протяжка по кузову</b> — новая точка ровно на существующей ' +
-      'грани (грань делится на три, новой поверхности не появляется). Появляются ' +
-      'зелёные метки. Ближе 15 % к вершинам грани точка не ставится — иначе ' +
-      'получились бы вырожденные треугольники.'
+      'грани (грань делится на три, новой поверхности не появляется). Сразу после ' +
+      'вставки ближайшие узлы притягиваются к новой точке (перевороты рёбер по ' +
+      'Делоне), поэтому «иголок» не остаётся. Появляются зелёные метки. Ближе 15 % ' +
+      'к вершинам грани точка не ставится — иначе получились бы вырожденные ' +
+      'треугольники.'
   };
 
   function syncInfo(note) {
@@ -894,7 +1075,8 @@ export function initSculpt(opts) {
       flush();
       if (res && info) {
         info.textContent = `фигура «${SHAPE_NAMES[res.kind]}» ${invert ? 'вытянула' : 'вдавила'} ` +
-          `поверхность: ${res.moved} вершин, макс. ${(res.maxd / U).toFixed(2)} мм`;
+          `поверхность: ${res.moved} вершин на ${(res.maxd / U).toFixed(2)} мм` +
+          (res.refined ? ` · в пятне добавлено ${res.refined} точек` : '');
       }
       painting = false;
     } else {
@@ -1057,9 +1239,8 @@ export function initSculpt(opts) {
     pushHist();
     if (count !== origCount || liveIndex.length !== origIndex.length) {
       /* точки добавлялись — возвращаем исходную геометрию целиком */
-      src = Float32Array.from(origSrc); count = origCount;
-      attr = new THREE.BufferAttribute(src, 3);
-      geom.setAttribute('position', attr);
+      count = origCount;
+      applySrc(Float32Array.from(origSrc));
       col = new Float32Array(count * 3).fill(1);
       geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
       setIndex(origIndex.slice());

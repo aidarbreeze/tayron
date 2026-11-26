@@ -612,8 +612,17 @@ export function imprintShape(topo, pos, shape, amount, normals) {
       sdf = Math.hypot(u, w, h) - R;
     }
     if (sdf >= 0) continue;                          // вне фигуры
-    const t = Math.min(1, -sdf / H);                 // чем глубже, тем сильнее
-    const s = -amount * smooth01(t);                 // amount > 0 — вдавить
+    /* band — ширина кромки: 0 → прежний плавный профиль, > 0 → жёсткий штамп
+       (плоское дно, подъём только в узкой полосе у края) */
+    const inside = -sdf;
+    const band = shape.band > 0 ? shape.band : 0;
+    let s;
+    if (band > 0) {
+      s = -amount * (inside >= band ? 1 : inside / band);
+    } else {
+      const t = Math.min(1, inside / H);
+      s = -amount * smooth01(t);
+    }
     if (s === 0) continue;
     pos[o] += normals[o] * s;
     pos[o + 1] += normals[o + 1] * s;
