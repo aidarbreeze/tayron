@@ -84,9 +84,13 @@ export function initSculpt(opts) {
     geom.attributes.color.needsUpdate = true;
   }
   function paintMarks() {
+    /* Выделение принадлежит инструменту «Участок»: пока активен другой
+       инструмент, бирюзовая подсветка спрятана, но сами закрашенные узлы
+       остаются — клавиша 1 вернёт их на экран вместе с выделением. */
+    const showReg = !tool || tool === 'select';
     for (let v = 0; v < vk; v++) {
       const k = v * 3;
-      if (reg[v]) { CANON_COL[k] = 0.34; CANON_COL[k + 1] = 1.0; CANON_COL[k + 2] = 0.80; }
+      if (reg[v] && showReg) { CANON_COL[k] = 0.34; CANON_COL[k + 1] = 1.0; CANON_COL[k + 2] = 0.80; }
       else        { CANON_COL[k] = 1;    CANON_COL[k + 1] = 1;    CANON_COL[k + 2] = 1;    }
     }
     repaintColors();
@@ -571,7 +575,9 @@ export function initSculpt(opts) {
       T: { src, index: liveIndex, count, vk }
     };
   }
+  let dirty = false;                 // в правке есть несохранённое — предупредим при закрытии
   function pushHist(snap) {
+    dirty = true;
     hist.push(snap || snapshot());
     if (hist.length > 15) hist.shift();
     redo.length = 0;
@@ -745,27 +751,34 @@ export function initSculpt(opts) {
   }
 
   /* ---------- 2. ластик ---------- */
+  function markDead(v) {
+    if (v < 0 || dead[v] || (block && block[v])) return 0;
+    dead[v] = 1; pending[v] = 1; delTotal++;
+    if (reg[v]) { reg[v] = 0; regionN--; }
+    return 1;
+  }
   function eraseAt(c) {
     const r2 = brushR() * brushR();
     let n = 0;
-    const mark = (v) => {
-      if (dead[v] || (block && block[v])) return;
-      dead[v] = 1; pending[v] = 1; delTotal++; n++;
-      if (reg[v]) { reg[v] = 0; regionN--; }
-    };
     for (let v = 0; v < vk; v++) {
       const o = v * 3;
       const dx = pos[o] - c[0], dy = pos[o + 1] - c[1], dz = pos[o + 2] - c[2];
-      if (dx * dx + dy * dy + dz * dz <= r2) mark(v);
+      if (dx * dx + dy * dy + dz * dz <= r2) n += markDead(v);
     }
-    if (!n) { const v = nearestNodeNear(c, dead, brushR() * 1.6); if (v >= 0) mark(v); }
+    if (!n) n += markDead(nearestNodeNear(c, dead, brushR() * 1.6));
     return n;
+  }
+  /** Shift+ластик — точечно: уходит ровно один ближайший узел, кисть не работает. */
+  function eraseOneAt(c) {
+    return markDead(nearestNodeNear(c, block, brushR() * 1.6));
   }
   function eraseStamp(clientX, clientY) {
     const c = hitPoint(clientX, clientY);
     if (!c) return 0;
-    let n = eraseAt(c);
-    if (sym) n += eraseAt([c[0], -c[1], c[2]]);
+    const one = eraseOneAt.bind(null), many = eraseAt;
+    const f = invert ? one : many;
+    let n = f(c);
+    if (sym) n += f([c[0], -c[1], c[2]]);
     if (n) { strokeDel += n; paintMarks(); updateDots(); syncInfo(); }
     return n;
   }
@@ -964,6 +977,35 @@ export function initSculpt(opts) {
     const res = imprintShape(topo, pos, shape, sign * depthD(), n, allow);
     return { ...res, refined };
   }
+  /* Штрих фигурой: ведёте с зажатой кнопкой — штампы встают вдоль следа с шагом
+     0.9 радиуса кисти. Каждый штамп на кузове — это сгущение сетки (0.1–0.6 с),
+     поэтому за один штрих не больше SHAPE_MAX_STAMPS. */
+  const SHAPE_MAX_STAMPS = 6;
+  let shapeCount = 0, shapeLast = null;
+  function shapeDrag(clientX, clientY, force = false) {
+    if (!force && shapeCount >= SHAPE_MAX_STAMPS) return null;
+    const c = hit(clientX, clientY);
+    if (!c) return null;
+    if (!force && shapeLast) {
+      const dx = c[0] - shapeLast[0], dy = c[1] - shapeLast[1], dz = c[2] - shapeLast[2];
+      if (Math.sqrt(dx * dx + dy * dy + dz * dz) < brushR() * 0.9) return null;  // тот же штамп
+    }
+    /* след ушёл на другую сторону кузова — маска лицевых узлов пересчитывается */
+    computeFront(c);
+    makeBlock();
+    const res = shapeStamp(clientX, clientY, invert ? -1 : 1);
+    if (!res) return null;
+    shapeLast = c; shapeCount++;
+    nrm = null;
+    flush();
+    if (info) {
+      info.textContent = `фигура «${SHAPE_NAMES[res.kind]}» ${invert ? 'вытянула' : 'вдавила'} ` +
+        `поверхность: ${res.moved} вершин на ${(res.maxd / U).toFixed(2)} мм` +
+        (res.refined ? ` · в пятне добавлено ${res.refined} точек` : '') +
+        (shapeCount > 1 ? ` · штамп ${shapeCount} из ${SHAPE_MAX_STAMPS}` : '');
+    }
+    return res;
+  }
   function shapeStamp(clientX, clientY, sign) {
     const c = hitPoint(clientX, clientY);
     if (!c) return null;
@@ -1023,6 +1065,17 @@ export function initSculpt(opts) {
       syncInfo();
     }
     return res;
+  }
+
+  /* ---------- снять выделение ---------- */
+  function deselect() {
+    if (!regionN) { syncInfo('выделения нет — закрасьте участок кистью'); return 0; }
+    const n = regionN;
+    pushHist();                       // выделение можно вернуть через Ctrl+Z
+    reg.fill(0); regionN = 0; regionFront = null;
+    paintMarks();
+    syncInfo(`выделение снято: ${n} вершин`);
+    return n;
   }
 
   /* ---------- действия с закрашенной областью ---------- */
@@ -1158,7 +1211,8 @@ export function initSculpt(opts) {
     select: hint ? hint.innerHTML : '',
     erase: 'Левой кнопкой <b>сотрите</b> лишние точки: они подсвечиваются красными ' +
       'точками и уходят по отпусканию кнопки, а дырка зашивается треугольниками по ' +
-      'своей кромке — поверхность сама соединится с ближайшими оставшимися точками.',
+      'своей кромке — поверхность сама соединится с ближайшими оставшимися точками. ' +
+      'С зажатым <b>Shift</b> — точечно: уходит один ближайший узел, кисть не работает.',
     pen: 'Левой кнопкой <b>ведите по поверхности</b>: под пером остаётся валик ' +
       'высотой «Глубина» и шириной «Кисть» — высота не копится за штрих, сколько ' +
       'бы вы ни водили мышью. С зажатым <b>Shift</b> — канавка (внутрь).',
@@ -1181,6 +1235,12 @@ export function initSculpt(opts) {
 
   function syncInfo(note) {
     syncChip();
+    const regRow = $('sc-regrow');
+    if (regRow) {
+      regRow.classList.toggle('hd', !regionN);
+      const btn = $('sc-deselect');
+      if (btn && regionN) btn.textContent = `✕ Снять выделение · ${regionN}`;
+    }
     if (!info) return;
     if (note) { info.textContent = note; return; }
     const faces = liveIndex.length / 3;
@@ -1255,7 +1315,9 @@ export function initSculpt(opts) {
 
   function setTool(t) {
     if (t !== tool) hideCursor();
+    const wasSelect = tool === 'select' && regionN > 0;
     tool = (tool === t) ? null : t;
+    const keepRegion = wasSelect && tool && tool !== 'select';
     syncToolButtons();
     if (hint) hint.innerHTML = HINTS[tool] || HINTS.select;
     if (tool !== 'measure') { measPts = []; measLine.visible = false; }
@@ -1266,7 +1328,11 @@ export function initSculpt(opts) {
     clearDots();
     syncControls();
     paintMarks();
-    syncInfo();
+    if (keepRegion) {
+      syncInfo(`выделение сохранено: ${regionN} вершин — клавиша 1 вернёт к нему, 0 снимет`);
+    } else {
+      syncInfo();
+    }
   }
 
   const cvs = renderer.domElement;
@@ -1296,18 +1362,11 @@ export function initSculpt(opts) {
       flush();
     } else if (tool === 'shape') {
       pushHist(); nrm = null;
+      shapeCount = 0; shapeLast = null;
       const c0 = hitPoint(e.clientX, e.clientY);
       if (c0) computeFront(c0);
       makeBlock();
-      const res = shapeStamp(e.clientX, e.clientY, invert ? -1 : 1);
-      nrm = null;
-      flush();
-      if (res && info) {
-        info.textContent = `фигура «${SHAPE_NAMES[res.kind]}» ${invert ? 'вытянула' : 'вдавила'} ` +
-          `поверхность: ${res.moved} вершин на ${(res.maxd / U).toFixed(2)} мм` +
-          (res.refined ? ` · в пятне добавлено ${res.refined} точек` : '');
-      }
-      painting = false;
+      shapeDrag(e.clientX, e.clientY, true);
     } else {
       const c0 = hitPoint(e.clientX, e.clientY);
       if (c0) computeFront(c0);
@@ -1321,6 +1380,7 @@ export function initSculpt(opts) {
     if (tool === 'point') addPointsAt(e.clientX, e.clientY);
     else if (tool === 'erase') eraseStamp(e.clientX, e.clientY);
     else if (tool === 'pen') { penStamp(e.clientX, e.clientY, invert ? -1 : 1); flush(); }
+    else if (tool === 'shape') shapeDrag(e.clientX, e.clientY);
     else if (tool === 'select') stamp(e.clientX, e.clientY);
   });
   const stop = () => {
@@ -1476,6 +1536,16 @@ export function initSculpt(opts) {
     hist.push(snapshot());
     restore(r);
   });
+  on('sc-deselect', deselect);
+  on('sc-proj-save', saveProject);
+  on('sc-proj-load', () => { const f = $('sc-file'); if (f) f.click(); });
+  on('sc-file', (e) => {
+    const file = e && e.target && e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { loadProject(String(reader.result)); if (e.target) e.target.value = ''; };
+    reader.readAsText(file);
+  }, 'change');
   on('sc-clear', () => {
     pushHist();
     if (count !== origCount || liveIndex.length !== origIndex.length) {
@@ -1496,8 +1566,123 @@ export function initSculpt(opts) {
     added.fill(0); addedTotal = 0; front.fill(1); block = null; allow = null;
     setIndex(origIndex.slice());
     nrm = null;
+    dirty = false;
     paintMarks(); updateAddedDots(); flush(); syncInfo();
   });
+  /* ---------- сохранение и загрузка правки ----------
+     В 3MF/STL уходит готовая печать, а этот файл — чтобы продолжить работу:
+     смещения вершин от исходного кузова, маски (выделение, удалённые,
+     добавленные узлы) и индексы, если топология менялась. Файл маленький:
+     пишутся только те вершины, которые действительно сдвинуты. */
+  const r4 = (x) => Math.round(x * 1e4) / 1e4;
+  /* Индексы после правки топологии отличаются от исходных локально: храним
+     только середину между общим началом и общим концом. Один вставленный узел
+     даёт вместо 2 МБ чисел несколько десятков. */
+  function indexPacked() {
+    const a = liveIndex, b = origIndex;
+    const n = Math.min(a.length, b.length);
+    let p = 0;
+    while (p < n && a[p] === b[p]) p++;
+    let s = 0;
+    while (s < n - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+    return { base: b.length, p, s, ins: Array.from(a.subarray(p, a.length - s)) };
+  }
+  function indexUnpacked(pack) {
+    if (!pack || !(pack.base === origIndex.length) || pack.p < 0 || pack.s < 0 ||
+        pack.p + pack.s > origIndex.length || !Array.isArray(pack.ins)) return null;
+    const out = new Int32Array(pack.p + pack.ins.length + pack.s);
+    out.set(origIndex.subarray(0, pack.p), 0);
+    out.set(Int32Array.from(pack.ins), pack.p);
+    out.set(origIndex.subarray(origIndex.length - pack.s), pack.p + pack.ins.length);
+    return out;
+  }
+  function projectData() {
+    flush();                                  // pos → src, чтобы сохранить актуальное
+    const sameIndex = liveIndex.length === origIndex.length &&
+      liveIndex.every((x, i) => x === origIndex[i]);
+    const delta = [];
+    for (let i = 0; i < count; i++) {
+      const o = i * 3;
+      if (i < origCount) {
+        if (src[o] === origSrc[o] && src[o + 1] === origSrc[o + 1] && src[o + 2] === origSrc[o + 2]) continue;
+      }
+      delta.push(i, r4(src[o]), r4(src[o + 1]), r4(src[o + 2]));
+    }
+    const list = (m) => { const a = []; for (let v = 0; v < vk; v++) if (m[v]) a.push(v); return a; };
+    return {
+      app: 'tayron-sculpt', v: 1, when: new Date().toISOString(), U,
+      count, vk, origCount, sameIndex,
+      index: sameIndex ? null : indexPacked(),
+      verts: delta, reg: list(reg), dead: list(dead), added: list(added),
+      regionN, delTotal, addedTotal
+    };
+  }
+  function saveProject() {
+    const data = projectData();
+    const json = JSON.stringify(data);
+    const name = 'Tayron_body_edit.json';
+    const res = downloadBytes(new TextEncoder().encode(json), name, 'application/json');
+    dirty = false;
+    if (info) {
+      info.innerHTML = `правка сохранена: <a href="${res.url}" download="${name}" style="color:var(--acc)">` +
+        `скачать ${name}</a> · ${(json.length / 1024).toFixed(1)} КБ · сдвинуто вершин ` +
+        `${data.verts.length / 4}` + (data.sameIndex ? '' : ' · с новой топологией');
+    }
+    return data;
+  }
+  function loadProject(text) {
+    let d = null;
+    try { d = JSON.parse(text); } catch (_) { d = null; }
+    if (!d || d.app !== 'tayron-sculpt') {
+      syncInfo('это не правка Tayron: нужен файл, сохранённый кнопкой «Сохранить»');
+      return false;
+    }
+    if (!Array.isArray(d.verts) || !(d.count >= origCount) || (d.index && !d.index.ins)) {
+      syncInfo('файл неполный или сохранён от другой модели');
+      return false;
+    }
+    if (d.U && Math.abs(d.U - U) > 1e-6) {
+      syncInfo(`файл от модели с другим масштабом (${d.U} против ${U})`);
+      return false;
+    }
+    const useIndex = d.index ? indexUnpacked(d.index) : origIndex.slice();
+    if (!useIndex) { syncInfo('файл правки от другой топологии — не могу восстановить индексы'); return false; }
+    pushHist();
+    count = d.count | 0;
+    const next = new Float32Array(count * 3);
+    next.set(origSrc.subarray(0, Math.min(origSrc.length, next.length)));
+    for (let k = 0; k + 3 < d.verts.length; k += 4) {
+      const i = d.verts[k] | 0, o = i * 3;
+      if (i < 0 || o + 2 >= next.length) continue;
+      next[o] = d.verts[k + 1]; next[o + 1] = d.verts[k + 2]; next[o + 2] = d.verts[k + 3];
+    }
+    applySrc(next);
+    col = new Float32Array(count * 3).fill(1);
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    setIndex(useIndex);
+    topo = buildTopology(src, liveIndex);
+    vk = topo.vk; canon = topo.canon; pos0 = topo.pos0;
+    topo.vk = vk; topo.count = count; topo.pos0 = pos0; topoDirty = false;
+    resizeNodeArrays(Math.max(vk, reg.length, dead.length, added.length));
+    pos = Float32Array.from(pos0);
+    reg.fill(0); dead.fill(0); added.fill(0); pending.fill(0); front.fill(1);
+    const mark = (m, arr) => { let n = 0; if (Array.isArray(arr)) for (const v of arr) { if (v >= 0 && v < vk) { m[v] = 1; n++; } } return n; };
+    regionN = mark(reg, d.reg);
+    delTotal = mark(dead, d.dead);
+    addedTotal = mark(added, d.added);
+    block = null; allow = null; regionFront = null; nrm = null;
+    free = freeMask(topo, reg);
+    clearDots(); paintMarks(); updateAddedDots(); flush();
+    dirty = false;
+    if (d.vk && d.vk !== vk) {
+      syncInfo(`правка загружена, но узлов стало ${vk} вместо ${d.vk} — маски пересчитаны`);
+    } else {
+      syncInfo(`правка загружена: ${count} верт. · сдвинуто ${d.verts.length / 4} · ` +
+        `удалено ${delTotal} · добавлено ${addedTotal}`);
+    }
+    return true;
+  }
+
   /* ---------- горячие клавиши: 1…6 — кисти, Esc — выход, [ ] — размер кисти ---------- */
   const TOOL_KEYS = { '1': 'select', '2': 'erase', '3': 'pen', '4': 'shape', '5': 'point', '6': 'measure' };
   function stepBrush(d) {
@@ -1514,11 +1699,20 @@ export function initSculpt(opts) {
     if (TOOL_KEYS[e.key]) { setTool(TOOL_KEYS[e.key]); e.preventDefault(); return; }
     if (e.key === 'Escape' && tool) { setTool(tool); e.preventDefault(); return; }
     if (e.key === '[') { stepBrush(-0.5); e.preventDefault(); return; }
-    if (e.key === ']') { stepBrush(0.5); e.preventDefault(); }
+    if (e.key === ']') { stepBrush(0.5); e.preventDefault(); return; }
+    if (e.key === '0') { deselect(); e.preventDefault(); }
+  });
+  /* закрывать вкладку с несохранённой правкой без предупреждения нельзя */
+  globalThis.addEventListener && globalThis.addEventListener('beforeunload', (e) => {
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = 'в правке есть несохранённые изменения — сохраните её (💾)';
+    return e.returnValue;
   });
   globalThis.addEventListener && globalThis.addEventListener('keydown', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
     const k = (e.key || '').toLowerCase();
+    if (k === 's') { e.preventDefault(); saveProject(); return; }   // Ctrl+S — сохранить правку
     if (k === 'z' && !e.shiftKey) { e.preventDefault(); const h = hist.pop(); if (h) { redo.push(snapshot()); restore(h); } }
     else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); const r = redo.pop(); if (r) { hist.push(snapshot()); restore(r); } }
   });
@@ -1563,6 +1757,12 @@ export function initSculpt(opts) {
     get tool() { return tool; },
     get erasing() { return tool === 'erase'; },
     setTool,
+    deselect,
+    saveProject,
+    loadProject,
+    get dirty() { return dirty; },
+    projectData,
+    get projectJSON() { return JSON.stringify(projectData()); },
     get regionCount() { return regionN; },
     get deletedCount() { return delTotal; },
     get symmetrical() { return sym; },

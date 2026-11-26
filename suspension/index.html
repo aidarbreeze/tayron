@@ -167,7 +167,7 @@
     колесом — приблизить); кольцо под курсором показывает размер кисти. Дальше — кнопки
     ниже: <b>«Сгладить»</b> (шаг за нажатие), <b>«Выровнять»</b> (в плоскость),
     <b>«Обострить»</b>, <b>«Выдавить» / «Вдавить»</b> на глубину.
-    <b>[</b> и <b>]</b> — размер кисти, <b>Esc</b> — выйти.</p>
+    <b>[</b> и <b>]</b> — размер кисти, <b>0</b> — снять выделение, <b>Esc</b> — выйти.</p>
   <div class="row sc-row hd" id="sc-brushrow">
     <span class="tag" style="width:auto">Кисть</span>
     <input type="range" id="sc-brush" min="0.1" max="20" step="0.1" value="0.5">
@@ -197,6 +197,9 @@
     <button class="btn" id="sc-out">⬆ Выдавить</button>
     <button class="btn" id="sc-in">⬇ Вдавить</button>
   </div>
+  <div class="presets hd" id="sc-regrow">
+    <button class="btn wide" id="sc-deselect" title="Снять выделение (клавиша 0)">✕ Снять выделение</button>
+  </div>
 
   <h2>Вид и проверка</h2>
   <div class="presets">
@@ -223,6 +226,13 @@
     <button class="btn" id="sc-save">⬇ 3MF</button>
     <button class="btn" id="sc-stl">⬇ STL</button>
   </div>
+  <div class="presets" style="margin-top:6px">
+    <button class="btn" id="sc-proj-save" title="Сохранить правку в .json — чтобы продолжить позже">💾 Сохранить</button>
+    <button class="btn" id="sc-proj-load" title="Открыть сохранённую правку (.json)">📂 Открыть</button>
+  </div>
+  <input type="file" id="sc-file" accept=".json,application/json" hidden>
+  <p class="hint"><b>💾/📂</b> — правка в файле .json: продолжить работу после перезагрузки.
+    <b>3MF/STL</b> — готовая модель для печати.</p>
   <p id="sc-info">область не выбрана — закрасьте участок кистью</p>
 </div>
 
@@ -330,8 +340,10 @@
   <span><b>ПКМ</b> — вращать</span>
   <span><b>колесо</b> — приблизить</span>
   <span><kbd>1</kbd>…<kbd>6</kbd> — кисти</span>
+  <span><kbd>0</kbd> — снять выделение</span>
   <span><kbd>Esc</kbd> — выход</span>
   <span><kbd>Ctrl</kbd>+<kbd>Z</kbd> — отмена</span>
+  <span><kbd>Ctrl</kbd>+<kbd>S</kbd> — сохранить правку</span>
 </div>
 
 <div id="loading"><div class="sp"></div><p>Собираю модель…</p></div>
