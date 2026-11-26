@@ -166,39 +166,59 @@
     <button class="btn" id="shake">Тряхнуть</button>
     <button class="btn" id="spin">▶ Крутить колёса</button>
     <button class="btn" id="xray">Рентген</button>
+    <button class="btn" id="wire">Сетка</button>
     <button class="btn" id="reset">Сброс камеры</button>
   </div>
 
   <h2>Сглаживание кузова</h2>
   <div class="presets">
-    <button class="btn wide" id="sc-mode">✎ Выбрать участок</button>
-    <button class="btn wide" id="sc-del">⌫ Удалять точки</button>
+    <button class="btn" id="sc-mode">✎ Участок</button>
+    <button class="btn" id="sc-del">⌫ Ластик</button>
+    <button class="btn" id="sc-pen">✏ Рисовать</button>
+    <button class="btn" id="sc-shape">◆ Фигура</button>
   </div>
   <p class="hint hd" id="sc-hint">Левой кнопкой <b>закрасьте</b> участок на кузове,
     правой — вращать камеру, колесом — приблизить. Затем жмите <b>«Сгладить»</b>
     столько раз, сколько нужно: каждое нажатие добавляет свой шаг, «Отменить»
     откатывает последнее. Двигаются только вершины — сетка остаётся замкнутой,
     ничего не режется; фары и эмблему просто не закрашивайте.
-    Кнопка <b>«Удалять точки»</b> переключает кисть в ластик: точки под ней
-    убираются, а дырка зашивается треугольниками по своей кромке — поверхность
-    сама соединяется с ближайшими оставшимися точками.</p>
+    <b>Ластик</b> подсвечивает удаляемые вершины красными точками: они уходят по
+    отпусканию кнопки, а дырка зашивается треугольниками по своей кромке.
+    <b>«Рисовать»</b> оставляет валик вдоль штриха, <b>«Фигура»</b> вдавливает в
+    кузов сферу, цилиндр или куб, <b>«Выдавить» / «Вдавить»</b> поднимают или
+    опускают закрашенную область. Кнопка <b>«Сетка»</b> показывает триангуляцию
+    тонкими чёрными линиями.</p>
   <div class="row sc-row hd">
     <span class="tag" style="width:auto">Кисть</span>
-    <input type="range" id="sc-brush" min="1" max="20" step="1" value="6">
-    <span class="val" id="sc-brushv">6 мм</span>
+    <input type="range" id="sc-brush" min="0.1" max="20" step="0.1" value="0.5">
+    <span class="val" id="sc-brushv">0.5 мм</span>
+  </div>
+  <div class="row sc-row hd" id="sc-depthrow">
+    <span class="tag" style="width:auto">Глубина</span>
+    <input type="range" id="sc-depth" min="0.05" max="3" step="0.05" value="0.5">
+    <span class="val" id="sc-depthv">0.50 мм</span>
   </div>
   <div class="row sc-row hd" id="sc-amtrow">
     <span class="tag" style="width:auto">Степень</span>
     <input type="range" id="sc-amt" min="5" max="100" step="1" value="25">
     <span class="val" id="sc-amtv">25%</span>
   </div>
-  <div class="presets sc-row hd">
+  <div class="presets sc-row hd" id="sc-shaperow" style="grid-template-columns:1fr 1fr 1fr">
+    <button class="btn on" id="sc-fig-sphere">● Сфера</button>
+    <button class="btn" id="sc-fig-cylinder">▮ Цилиндр</button>
+    <button class="btn" id="sc-fig-box">■ Куб</button>
+  </div>
+  <div class="presets sc-row hd" id="sc-extrude-row" style="grid-template-columns:1fr 1fr 1fr">
     <button class="btn" id="sc-go">≡ Сгладить</button>
+    <button class="btn" id="sc-out">⬆ Выдавить</button>
+    <button class="btn" id="sc-in">⬇ Вдавить</button>
+  </div>
+  <div class="presets sc-row hd">
     <button class="btn" id="sc-undo">↶ Отменить</button>
     <button class="btn" id="sc-clear">Сбросить</button>
-    <button class="btn" id="sc-save">⬇ Скачать 3MF</button>
+    <button class="btn wide" id="sc-save">⬇ Скачать 3MF</button>
   </div>
-  <p id="sc-info">область не выбрана</p>
+  <p id="sc-info">область не выбрана — закрасьте участок кистью</p>
 </div>
 
 <div class="panel" id="tele">

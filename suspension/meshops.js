@@ -495,6 +495,134 @@ export function deleteAndFill(topo, index, pos, deleted, report) {
   return { index: out, removedFaces: removed, holes: loops.length, addedFaces: added, extraDeleted: extra };
 }
 
+/* ============================================================
+   Лепка: нормали узлов и сдвиги вдоль них.
+
+   Все инструменты работают одинаково — двигают существующие вершины вдоль их
+   нормалей. Ни одна операция не добавляет и не удаляет геометрию, поэтому
+   после любого сдвига сетка остаётся той же замкнутой сеткой.
+   ============================================================ */
+
+/** Нормали узлов: сумма нормалей граней (по площади), нормированная. */
+export function vertexNormals(topo, index, pos) {
+  const { canon, vk } = topo;
+  const n = new Float32Array(vk * 3);
+  for (let i = 0; i < index.length; i += 3) {
+    const a = canon[index[i]] * 3, b = canon[index[i + 1]] * 3, c = canon[index[i + 2]] * 3;
+    const e1x = pos[b] - pos[a], e1y = pos[b + 1] - pos[a + 1], e1z = pos[b + 2] - pos[a + 2];
+    const e2x = pos[c] - pos[a], e2y = pos[c + 1] - pos[a + 1], e2z = pos[c + 2] - pos[a + 2];
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    n[a] += nx; n[a + 1] += ny; n[a + 2] += nz;
+    n[b] += nx; n[b + 1] += ny; n[b + 2] += nz;
+    n[c] += nx; n[c + 1] += ny; n[c + 2] += nz;
+  }
+  for (let v = 0; v < vk; v++) {
+    const o = v * 3;
+    const len = Math.hypot(n[o], n[o + 1], n[o + 2]);
+    if (len > 1e-12) { n[o] /= len; n[o + 1] /= len; n[o + 2] /= len; }
+    else { n[o] = 0; n[o + 1] = 0; n[o + 2] = 1; }
+  }
+  return n;
+}
+
+const smooth01 = (t) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
+
+/**
+ * Сдвиг шара: вершины в радиусе r уезжают вдоль своих нормалей на
+ * amount * smoothstep(1 − d/r). Знак amount — вдавить (минус) или вытянуть.
+ * only — маска узлов, которые можно двигать (например, без удалённых).
+ */
+export function pushBall(topo, pos, center, r, amount, normals, only) {
+  const { vk } = topo;
+  let moved = 0, maxd = 0;
+  const r2 = r * r;
+  for (let v = 0; v < vk; v++) {
+    if (only && !only[v]) continue;
+    const o = v * 3;
+    const dx = pos[o] - center[0], dy = pos[o + 1] - center[1], dz = pos[o + 2] - center[2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 >= r2) continue;
+    const w = smooth01(1 - Math.sqrt(d2) / r);
+    const s = amount * w;
+    if (s === 0) continue;
+    pos[o] += normals[o] * s;
+    pos[o + 1] += normals[o + 1] * s;
+    pos[o + 2] += normals[o + 2] * s;
+    moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
+  }
+  return { moved, maxd };
+}
+
+/**
+ * Выдавливание закрашенной области: все узлы области уезжают вдоль нормалей на
+ * amount, у кромки шаг гасится плавным входом (ширина soft в узлах).
+ */
+export function offsetRegion(topo, pos, reg, amount, normals, soft = 4) {
+  const { vk } = topo;
+  const w = boundaryFalloff(topo, reg, soft);
+  let moved = 0, maxd = 0;
+  for (let v = 0; v < vk; v++) {
+    if (!reg[v] || w[v] <= 0) continue;
+    const o = v * 3;
+    const s = amount * w[v];
+    pos[o] += normals[o] * s;
+    pos[o + 1] += normals[o + 1] * s;
+    pos[o + 2] += normals[o + 2] * s;
+    moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
+  }
+  return { moved, maxd };
+}
+
+/**
+ * Отпечаток фигуры в поверхности.
+ * shape: { kind: 'sphere'|'box'|'cylinder', center, n (нормаль поверхности),
+ *          size: {r, h, a, b} в единицах модели }
+ * Вершины внутри фигуры вдавливаются вдоль своей нормали пропорционально
+ * глубине погружения — поверхность принимает форму фигуры, оставаясь целой.
+ * amount > 0 — вдавить, < 0 — вытянуть (фигура «вытаскивает» купол).
+ */
+export function imprintShape(topo, pos, shape, amount, normals) {
+  const { vk } = topo;
+  const c = shape.center;
+  // локальная ось фигуры (вдоль нормали поверхности), и два вектора в плоскости
+  let nx = shape.n[0], ny = shape.n[1], nz = shape.n[2];
+  const ln = Math.hypot(nx, ny, nz) || 1; nx /= ln; ny /= ln; nz /= ln;
+  let tx = Math.abs(nx) < 0.9 ? 1 : 0, ty = Math.abs(nx) < 0.9 ? 0 : 1, tz = 0;
+  let ux = ty * nz - tz * ny, uy = tz * nx - tx * nz, uz = tx * ny - ty * nx;
+  const lu = Math.hypot(ux, uy, uz) || 1; ux /= lu; uy /= lu; uz /= lu;
+  const vx = ny * uz - nz * uy, vy = nz * ux - nx * uz, vz = nx * uy - ny * ux;
+
+  const R = shape.size.r || 1, H = shape.size.h || R;
+  const A = shape.size.a || R, B = shape.size.b || R;
+  let moved = 0, maxd = 0;
+  for (let v = 0; v < vk; v++) {
+    const o = v * 3;
+    const px = pos[o] - c[0], py = pos[o + 1] - c[1], pz = pos[o + 2] - c[2];
+    const u = px * ux + py * uy + pz * uz;
+    const w = px * vx + py * vy + pz * vz;
+    const h = px * nx + py * ny + pz * nz;          // вдоль нормали поверхности
+    let sdf;
+    if (shape.kind === 'box') {
+      sdf = Math.max(Math.abs(u) - A, Math.abs(w) - B, Math.abs(h) - H);
+    } else if (shape.kind === 'cylinder') {
+      sdf = Math.max(Math.hypot(u, w) - R, Math.abs(h) - H);
+    } else {                                         // сфера
+      sdf = Math.hypot(u, w, h) - R;
+    }
+    if (sdf >= 0) continue;                          // вне фигуры
+    const t = Math.min(1, -sdf / H);                 // чем глубже, тем сильнее
+    const s = -amount * smooth01(t);                 // amount > 0 — вдавить
+    if (s === 0) continue;
+    pos[o] += normals[o] * s;
+    pos[o + 1] += normals[o + 1] * s;
+    pos[o + 2] += normals[o + 2] * s;
+    moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
+  }
+  return { moved, maxd };
+}
+
 /** Перед экспортом: выкинуть вершины, на которые не ссылается ни одна грань. */
 export function compactMesh(positions, index) {
   const nv = positions.length / 3;
