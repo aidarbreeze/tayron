@@ -133,6 +133,16 @@ def main():
     ap.add_argument('--out', default='Tayron_body_smooth_v2.3mf')
     ap.add_argument('--full', action='store_true',
                     help='снести на панель всю зону целиком, включая рёбра внутри неё')
+    ap.add_argument('--squash-mm', type=float, default=None,
+                    help='сжать рельеф участка к плоскости x = столько мм, оставив '
+                         'от исходного рельефа долю --squash-keep (только сдвиг '
+                         'существующих вершин, грани не меняются)')
+    ap.add_argument('--squash-keep', type=float, default=0.06,
+                    help='какая доля исходного рельефа остаётся (0.06 = 6 %)')
+    ap.add_argument('--squash-depth-mm', type=float, default=8.0,
+                    help='насколько глубоко от плоскости забирать вершины (сквозные соты)')
+    ap.add_argument('--squash-falloff-mm', type=float, default=2.0,
+                    help='ширина плавного перехода у контура участка, мм')
     a = ap.parse_args()
 
     V = F = V0 = None
@@ -174,6 +184,54 @@ def main():
                     comp[u] = cid; stack.append(u)
         cid += 1
     print('компонент зон:', cid)
+
+    if a.squash_mm is not None:
+        from scipy import ndimage as _ndi
+        L = a.squash_mm * U
+        keep = float(a.squash_keep)
+        yy = V[zone_f, 1] / U; zz = V[zone_f, 2] / U
+        step = 0.5
+        y0, y1 = yy.min() - 1.0, yy.max() + 1.0
+        z0, z1 = zz.min() - 1.0, zz.max() + 1.0
+        ny = int((y1 - y0) / step) + 1; nz = int((z1 - z0) / step) + 1
+        M = np.zeros((ny, nz), bool)
+        M[np.clip(((yy - y0) / step).astype(int), 0, ny - 1),
+          np.clip(((zz - z0) / step).astype(int), 0, nz - 1)] = True
+        M = _ndi.binary_fill_holes(_ndi.binary_closing(M, np.ones((3, 3)), border_value=0))
+        M = _ndi.binary_fill_holes(_ndi.binary_dilation(M, np.ones((3, 3)), iterations=2))
+        dist = _ndi.distance_transform_edt(M) * step
+
+        py, pz = V[:, 1] / U, V[:, 2] / U
+        # участок: контур закрашенного, только ниша (не рамка, не фонари, не эмблема)
+        inside = ((np.abs(py) < 21.0) & (pz > 22.3) & (pz < 30.6)
+                  & (V[:, 0] < (a.squash_mm + 0.9) * U) & (V[:, 0] > (a.squash_mm - a.squash_depth_mm) * U))
+        ii = np.clip(((py - y0) / step).astype(int), 0, ny - 1)
+        jj = np.clip(((pz - z0) / step).astype(int), 0, nz - 1)
+        inside &= M[ii, jj]
+        rad = np.hypot(V[:, 1], V[:, 2] - 25.7 * U) / U
+        inside &= rad > 4.8                                   # эмблему не трогаем
+        dd = dist[ii, jj]
+        def _ss(t):
+            t = np.clip(t, 0.0, 1.0)
+            return t * t * (3.0 - 2.0 * t)
+        # всё мягко: и по контуру закрашенного, и по границам по z, y и глубине
+        w = (_ss(dd / max(a.squash_falloff_mm, 1e-6))
+             * _ss((30.6 - pz) / 0.9) * _ss((pz - 22.3) / 0.9)
+             * _ss((21.0 - np.abs(py)) / 1.4)
+             * _ss(((a.squash_mm + 0.9) * U - V[:, 0]) / (0.7 * U))
+             * _ss((V[:, 0] - (a.squash_mm - a.squash_depth_mm) * U) / (1.5 * U)))
+        w = w * inside
+        Vout = np.array(V, float)
+        Vout[:, 0] = V[:, 0] + w * ((L + keep * (V[:, 0] - L)) - V[:, 0])
+        print('  сжатие рельефа к плоскости %.1f мм: вершин %d, сдвиг в среднем %.2f мм, макс %.2f мм'
+              % (a.squash_mm, int((w > 0).sum()),
+                 np.abs(Vout[:, 0] - V[:, 0])[w > 0].mean() / U if (w > 0).any() else 0,
+                 np.abs(Vout[:, 0] - V[:, 0]).max() / U))
+        m3mf.write(a.out, [('Кузов', __import__('trimesh').Trimesh(Vout, F, process=False))],
+                   meta='Кузов: рельеф участка сжат к плоскости, грани и вершины исходные')
+        print('вершин %d, граней %d' % (len(Vout), len(F)))
+        print('записано:', a.out)
+        return
 
     moved = 0
     for k in range(cid):
