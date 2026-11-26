@@ -1068,6 +1068,41 @@ export function initSculpt(opts) {
     if (out) { out.seg = bestSeg; out.t = bestT; }
     return best;
   }
+  /* Проекция точки на путь: lat — расстояние до оси, s — длина по дуге от начала,
+     beyond — −1/1, если точка за торцом (нужно для ПЛОСКИХ торцов желоба). */
+  function pathProj(pts, p) {
+    let best = Infinity, bestSeg = 0, bestT = 0;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+      const L2 = dx * dx + dy * dy + dz * dz;
+      let t = L2 > 1e-12 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy + (p[2] - a[2]) * dz) / L2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const qx = p[0] - (a[0] + dx * t), qy = p[1] - (a[1] + dy * t), qz = p[2] - (a[2] + dz * t);
+      const d2 = qx * qx + qy * qy + qz * qz;
+      if (d2 < best) { best = d2; bestSeg = i; bestT = t; }
+    }
+    let s = 0;
+    for (let i = 0; i < bestSeg; i++) {
+      const a = pts[i], b = pts[i + 1];
+      s += Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    }
+    const A = pts[bestSeg], B = pts[bestSeg + 1];
+    s += bestT * Math.hypot(B[0] - A[0], B[1] - A[1], B[2] - A[2]);
+    /* за торцом? смотрим, с какой стороны от крайних сечений лежит точка */
+    let beyond = 0;
+    if (bestT <= 1e-9 && bestSeg === 0) {
+      const t0 = [B[0] - A[0], B[1] - A[1], B[2] - A[2]];
+      const q = [p[0] - A[0], p[1] - A[1], p[2] - A[2]];
+      if (q[0] * t0[0] + q[1] * t0[1] + q[2] * t0[2] < 0) beyond = -1;
+    } else if (bestT >= 1 - 1e-9 && bestSeg === pts.length - 2) {
+      const A2 = pts[pts.length - 2], B2 = pts[pts.length - 1];
+      const t1 = [B2[0] - A2[0], B2[1] - A2[1], B2[2] - A2[2]];
+      const q = [p[0] - B2[0], p[1] - B2[1], p[2] - B2[2]];
+      if (q[0] * t1[0] + q[1] * t1[1] + q[2] * t1[2] > 0) beyond = 1;
+    }
+    return { lat: Math.sqrt(best), s, beyond, seg: bestSeg, t: bestT };
+  }
   /* Длина пути в единицах модели */
   function pathLen(pts) {
     let L = 0;
@@ -1087,7 +1122,7 @@ export function initSculpt(opts) {
     const dist = seg.length();
     if (dist < 1e-6) return [];
     const n = Math.max(2, Math.min(160, Math.ceil(dist / Math.max(1.0 * U, dist / 160))));
-    const pts = [a.slice()];
+    const pts = [], nrms = [];
     const nrm = new THREE.Vector3(0, 1, 0);
     let first = true;
     for (let i = 1; i <= n; i++) {
@@ -1104,8 +1139,29 @@ export function initSculpt(opts) {
       if (first) { pts[0] = [p.x, p.y, p.z]; first = false; }
       else pts.push([p.x, p.y, p.z]);
       if (h.face) nrm.copy(h.face.normal).normalize();
+      nrms[pts.length - 1] = [nrm.x, nrm.y, nrm.z];
     }
-    return pts.length >= 2 ? pts : [];
+    /* доводим путь до самой точки отпускания: иначе желоб короче протяжки */
+    if (pts.length >= 2) {
+      const last = pts[pts.length - 1];
+      const dl = Math.hypot(b[0] - last[0], b[1] - last[1], b[2] - last[2]);
+      if (dl > 0.05) {
+        const nn = nrms[pts.length - 1];
+        const o = mesh.localToWorld(new THREE.Vector3(b[0], b[1], b[2]).addScaledVector(
+          new THREE.Vector3(nn[0], nn[1], nn[2]), 60 * U));
+        ray.set(o, new THREE.Vector3(nn[0], nn[1], nn[2]).transformDirection(mesh.matrixWorld).negate());
+        ray.near = 0; ray.far = 200 * U;
+        const h = ray.intersectObject(mesh, false);
+        if (h.length) {
+          const q = mesh.worldToLocal(h[0].point.clone());
+          pts.push([q.x, q.y, q.z]);
+          nrms.push([nn[0], nn[1], nn[2]]);
+        }
+      }
+    }
+    for (let i = 0; i < pts.length; i++) if (!nrms[i]) nrms[i] = nrms[i - 1] || [0, 0, 1];
+    if (pts.length >= 2) { pts.nrms = nrms; return pts; }
+    return [];
   }
 
   /* Сгущение вдоль полосы делением РЁБЕР (бисекция), а не вставкой точки внутрь
@@ -1113,23 +1169,25 @@ export function initSculpt(opts) {
      Ступенями: сначала широкая и грубая зона, потом узкая и мелкая — иначе на
      краю полосы остаются длинные «веера» из больших граней и кромка рвётся. */
   function refineBand(pts, r, spacing, budget = 14000) {
+    /* r — радиус желоба: кромку режем по нему во всех ступенях, а отбор делаем
+       шире и грубее к краю, чтобы не было «вееров» из больших граней */
     const stages = [
       { r: r * 3.2, s: spacing * 8 },
       { r: r * 2.3, s: spacing * 4 },
       { r: r * 1.6, s: spacing * 2 },
-      { r: r * 1.2, s: spacing },
-      { r: r, s: spacing },
+      { r: r * 1.1, s: spacing },
     ];
     let total = 0;
     for (const st of stages) {
       if (total >= budget) break;
-      total += bandPass(pts, st.r, st.s, budget - total);
+      total += bandPass(pts, st.r, st.s, budget - total, r);
     }
     return total;
   }
 
-  function bandPass(pts, r, spacing, room) {
+  function bandPass(pts, r, spacing, room, rimR = null) {
     const s2 = spacing * spacing, r2 = r * r;
+    const rr2 = (rimR || r) * (rimR || r);
     let bx0 = Infinity, by0 = Infinity, bz0 = Infinity, bx1 = -Infinity, by1 = -Infinity, bz1 = -Infinity;
     for (const q of pts) {
       if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0];
@@ -1168,29 +1226,32 @@ export function initSculpt(opts) {
         const A = pt(ia), B = pt(ib);
         if (far(A) && far(B)) return;
         const da = distToPath(pts, A), db = distToPath(pts, B);
-        const inA = da <= r2, inB = db <= r2;
+        const rimA = da <= rr2, rimB = db <= rr2;          // кромка желоба
+        const inA = da <= r2, inB = db <= r2;              // полоса отбора (шире)
         const len2 = (B[0] - A[0]) ** 2 + (B[1] - A[1]) ** 2 + (B[2] - A[2]) ** 2;
-        if (inA && inB) {
-          if (len2 <= s2) return;                       // уже достаточно мелко
-          const p = lerp3(A, B, 0.5);
-          if (clashC(p)) return;
-          takeC(p); cuts.set(k, p);
+        /* 1) ребро пересекает кромку — режем ровно в точке касания: кромка
+              становится линией рёбер, а не рваной границей */
+        if (rimA !== rimB) {
+          if (len2 <= s2 * 4) return;                     // у кромки уже мелко
+          let lo = 0, hi = 1;
+          for (let it = 0; it < 14; it++) {
+            const m = (lo + hi) / 2;
+            if (distToPath(pts, lerp3(A, B, m)) <= rr2) lo = m; else hi = m;
+          }
+          const cut = lerp3(A, B, (lo + hi) / 2);
+          if (Math.min(Math.hypot(cut[0] - A[0], cut[1] - A[1], cut[2] - A[2]),
+                       Math.hypot(cut[0] - B[0], cut[1] - B[1], cut[2] - B[2])) < 0.12) return;
+          if (clashC(cut)) return;
+          takeC(cut); cuts.set(k, cut);
           return;
         }
-        if (inA === inB) return;                        // обе снаружи
-        if (len2 <= s2 * 4) return;                     // у кромки уже мелко
-        /* ребро пересекает кромку: ищем точку на расстоянии r бисекцией */
-        let lo = 0, hi = 1;
-        for (let it = 0; it < 14; it++) {
-          const m = (lo + hi) / 2;
-          if (distToPath(pts, lerp3(A, B, m)) <= r2) lo = m; else hi = m;
-        }
-        const cut = lerp3(A, B, (lo + hi) / 2);
-        /* кромка не должна лечь на вершину или на другой разрез */
-        if (Math.min(Math.hypot(cut[0] - A[0], cut[1] - A[1], cut[2] - A[2]),
-                     Math.hypot(cut[0] - B[0], cut[1] - B[1], cut[2] - B[2])) < 0.12) return;
-        if (clashC(cut)) return;
-        takeC(cut); cuts.set(k, cut);
+        /* 2) ребро целиком в полосе (внутри кромки или в пояске вокруг неё) —
+              делим, пока оно длиннее шага: и дно, и поясок становятся мелкими */
+        if (!inA || !inB) return;
+        if (len2 <= s2) return;
+        const p = lerp3(A, B, 0.5);
+        if (clashC(p)) return;
+        takeC(p); cuts.set(k, p);
       };
       const nf0 = liveIndex.length / 3;
       for (let f = 0; f < nf0; f++) {
@@ -1291,8 +1352,8 @@ export function initSculpt(opts) {
       return null;
     }
     /* 1) новые точки: густота по шагу, мелкому относительно ширины желоба */
-    const sp = Math.max(0.22 * U, hw / 2.0);
-    const added = refineBand(path, hw * 1.2, sp, 9000);
+    const sp = Math.max(0.16 * U, hw / 3.5);
+    const added = refineBand(path, hw, sp, 14000);
     ensureTopo();
     paintMarks();
     flush();
@@ -1313,7 +1374,10 @@ export function initSculpt(opts) {
        полоса уже приклеена к поверхности лучом снаружи, а из-за наклона борта
        половина желоба оказывалась «отвёрнутой» и не вдавливалась. */
     const nv = getNormals();
-    const depth = depthD();
+    const pn = path.nrms || null;      // нормали поверхности вдоль пути
+    /* Глубина в половину цилиндра: d = hw даёт ровно половину окружности.
+       Если ползунок больше радиуса — берём радиус, иначе срез «съест» бока. */
+    const depth = Math.min(depthD(), hw);
     const pre = globalThis.__groovePre ? Float32Array.from(pos) : null;
     let moved = 0, maxd = 0, skipped = 0;
     const bx0 = Math.min(...path.map(q => q[0])) - 2, bx1 = Math.max(...path.map(q => q[0])) + 2;
@@ -1324,19 +1388,35 @@ export function initSculpt(opts) {
       const px = pos[o], py = pos[o + 1], pz = pos[o + 2];
       if (px < bx0 || px > bx1 || py < by0 || py > by1 || pz < bz0 || pz > bz1) continue;
       if (!fine[v]) continue;
-      const d2 = distToPath(path, [px, py, pz]);
-      if (d2 > hw * hw) continue;
-      /* профиль желоба: плоское дно и плавный подъём к кромке. Резкая ступенька
-         на кромке давала «пилу» (кромка попадала между узлами), поэтому подъём
-         сглажен, а стенка при этом остаётся крутой. */
-      const u = 1 - Math.sqrt(d2) / hw;
-      const q = Math.min(1, u * 1.8);
-      const f = q * q * (3 - 2 * q);
+      const pr = pathProj(path, [px, py, pz]);
+      if (pr.beyond !== 0) continue;        // торцы желоба плоские: за торцом не режем
+      const d2 = pr.lat * pr.lat;
+      if (pr.lat > hw) continue;
+      /* Профиль — ПОЛОВИНА ЦИЛИНДРА: сечение канавки это полукруг радиуса hw,
+         вдавленный на глубину depth (depth = hw — ровно половина цилиндра).
+         У кромки глубина плавно уходит в ноль, край получается чистым. */
+      const u = Math.sqrt(d2) / hw;
+      let f = Math.sqrt(Math.max(0, 1 - u * u));
+      /* последние 18 % радиуса — мягкий вход: стенка полуцилиндра у кромки
+         вертикальная, и на гранях 0.2 мм кромка выглядела рваной */
+      if (u > 0.93) { const q = (u - 0.93) / 0.07; f *= 1 - q * q * (3 - 2 * q); }
       const s = -depth * f;
       if (s === 0) continue;
-      pos[o] += nv[o] * s;
-      pos[o + 1] += nv[o + 1] * s;
-      pos[o + 2] += nv[o + 2] * s;
+      /* Вдавливаем не по «своей» нормали узла, а по нормали поверхности в этой
+         точке пути: всё сечение едет в одну сторону, как настоящий резец —
+         иначе соседние узлы идут в разные стороны и появляется «рябь». */
+      let ex = nv[o], ey = nv[o + 1], ez = nv[o + 2];
+      if (pn && pn[pr.seg] && pn[pr.seg + 1]) {
+        const A2 = pn[pr.seg], B2 = pn[pr.seg + 1], t2 = pr.t || 0;
+        ex = A2[0] + (B2[0] - A2[0]) * t2;
+        ey = A2[1] + (B2[1] - A2[1]) * t2;
+        ez = A2[2] + (B2[2] - A2[2]) * t2;
+        const le = Math.hypot(ex, ey, ez) || 1;
+        ex /= le; ey /= le; ez /= le;
+      }
+      pos[o] += ex * s;
+      pos[o + 1] += ey * s;
+      pos[o + 2] += ez * s;
       moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
     }
     /* 3) разгладить поясок вокруг желоба: мелкие грани на неровной панели дают
@@ -1376,10 +1456,27 @@ export function initSculpt(opts) {
           /* сдвиг не больше четверти шага — иначе сетку «поведёт» */
           const mvx = dx - nv[o] * nn, mvy = dy - nv[o + 1] * nn, mvz = dz - nv[o + 2] * nn;
           const ml = Math.hypot(mvx, mvy, mvz);
-          const sc = ml > 1e-9 ? Math.min(0.5, 0.25 * sp / ml) : 0;
+          const sc = ml > 1e-9 ? Math.min(0.5, 0.15 * sp / ml) : 0;
           pos[o] += sc * mvx; pos[o + 1] += sc * mvy; pos[o + 2] += sc * mvz;
         }
       }
+    }
+    /* 4) страховка: если какая-то грань всё же выродилась в ноль (площадь ~0),
+       сдвигаем одну её вершину на 0.002 единицы вдоль нормали. Топология не
+       меняется, вода-тайт не ломается, а нулевых граней в отчёте не остаётся. */
+    for (let i = 0; i < liveIndex.length; i += 3) {
+      const a = liveIndex[i], b2 = liveIndex[i + 1], c2 = liveIndex[i + 2];
+      if (!fine[a] && !fine[b2] && !fine[c2]) continue;
+      const ax = pos[a * 3], ay = pos[a * 3 + 1], az = pos[a * 3 + 2];
+      const bx = pos[b2 * 3], by = pos[b2 * 3 + 1], bz = pos[b2 * 3 + 2];
+      const cx = pos[c2 * 3], cy = pos[c2 * 3 + 1], cz = pos[c2 * 3 + 2];
+      const nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay);
+      const ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
+      const nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+      if (Math.hypot(nx, ny, nz) * 0.5 >= 1e-9) continue;
+      pos[a * 3] += nv[a * 3] * 0.002;
+      pos[a * 3 + 1] += nv[a * 3 + 1] * 0.002;
+      pos[a * 3 + 2] += nv[a * 3 + 2] * 0.002;
     }
     nrm = null;
     flush();
@@ -1391,9 +1488,10 @@ export function initSculpt(opts) {
       tPath: (tPath - t0) / 1000, tRefine: (tRefine - tPath) / 1000,
       tPress: (performance.now() - tRefine) / 1000
     };
+    const half = Math.abs(depth - hw) < 1e-6;
     syncInfo(`борозда ${(L / U).toFixed(1)} мм: ширина ${(hw * 2 / U).toFixed(2)} мм, ` +
-      `глубина ${(maxd / U).toFixed(2)} мм · новых точек ${added}, вдавлено ${moved} ` +
-      `· ${secs.toFixed(2)} с`);
+      `глубина ${(maxd / U).toFixed(2)} мм${half ? ' (полуцилиндр)' : ''} · ` +
+      `новых точек ${added}, вдавлено ${moved} · ${secs.toFixed(2)} с`);
     return grooveInfo;
   }
 
@@ -1990,7 +2088,10 @@ export function initSculpt(opts) {
       'зеркало y → −y); кромка копии привязывается к ближайшим оставшимся вершинам, ' +
       'щели зашиваются треугольниками — сетка остаётся замкнутой. «Радиус» — в каких ' +
       'пределах искать эти ближайшие вершины. Копия отменяется Ctrl+Z.',
-    groove: '<b>Протяните линию по кузову</b> — вдоль неё встанет <b>ровная борозда</b>. ' +
+    groove: '<b>Протяните линию по кузову</b> — вдоль неё, на всю длину протяжки, ' +
+      'встанет <b>канавка сечением в половину цилиндра</b> (ширина = ползунок «Ширина», ' +
+      'глубина = «Глубина»; глубина, равная половине ширины, даёт ровный полукруг). ' +
+      'Торцы плоские, кромка плавная. ' +
       'Сначала в полосе появляется <b>новый набор точек</b> (сетка сгущается), и только ' +
       'эти точки вдавливаются: дно плоское, глубина одинаковая по всей длине, стенки ' +
       'резкие. Кузов вне полосы <b>не двигается</b> — скелет модели остаётся на месте. ' +
