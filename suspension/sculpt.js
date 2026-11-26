@@ -541,11 +541,29 @@ export function initSculpt(opts) {
   function flush(withNormals = true) {
     expandToVertices(topo, pos, src);
     attr.needsUpdate = true;
+    /* Вершин стало больше (точка, зеркальная копия) — цвет и нормали обязаны
+       быть того же размера, иначе атрибуты разъезжаются и поверхность чёрная:
+       flatShading/vertexColors читают их по числу вершин. computeVertexNormals
+       переиспользует СТАРЫЙ буфер нормалей, поэтому его надо удалить. */
+    if (col.length !== attr.count * 3) {
+      const next = new Float32Array(attr.count * 3).fill(1);
+      next.set(col.subarray(0, Math.min(col.length, next.length)));
+      col = next;
+      geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      if (CANON_COL.length < vk * 3) {
+        const nc = new Float32Array(vk * 3).fill(1);
+        nc.set(CANON_COL.subarray(0, Math.min(CANON_COL.length, nc.length)));
+        CANON_COL = nc;
+      }
+      repaintColors();
+    }
     if (wireOn) {
       wireGeo.attributes.position.needsUpdate = true;
       if (wireDirty) { wireDirty = false; rebuildWire(); }
     }
     if (withNormals) {
+      const nAttr = geom.attributes.normal;
+      if (nAttr && nAttr.count !== attr.count) geom.deleteAttribute('normal');
       geom.computeVertexNormals();
       geom.computeBoundingSphere();
       geom.computeBoundingBox();
