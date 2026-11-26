@@ -142,9 +142,13 @@ def main():
                          'берётся от разглаженного поля, поэтому полос не даёт)')
     ap.add_argument('--squash-depth-mm', type=float, default=8.0,
                     help='насколько глубоко от плоскости забирать вершины (сквозные соты)')
-    ap.add_argument('--squash-falloff-mm', type=float, default=2.0,
+    ap.add_argument('--squash-falloff-mm', type=float, default=3.0,
                     help='ширина плавного перехода у контура участка, мм')
-    ap.add_argument('--squash-ztaper-mm', type=float, default=0.9,
+    ap.add_argument('--squash-edge-mm', type=float, default=2.0,
+                    help='плавность перехода у торцов по |y|, мм')
+    ap.add_argument('--squash-oval-margin-mm', type=float, default=0.25,
+                    help='зазор от медальона эмблемы, внутри которого не трогаем, мм')
+    ap.add_argument('--squash-ztaper-mm', type=float, default=1.5,
                     help='смягчение у верхней/нижней границы участка, мм')
     ap.add_argument('--squash-y-max', type=float, default=17.0,
                     help='докуда по |y| тянем панель (мм); меньше 21 — подрезать бока')
@@ -223,16 +227,29 @@ def main():
                   & (V[:, 0] < (a.squash_mm + 0.9) * U)
                   & (V[:, 0] > (a.squash_mm - a.squash_depth_mm) * U)
                   & M[ii, jj])
-        rad = np.hypot(V[:, 1], V[:, 2] - 25.7 * U) / U
-        inside &= rad > 4.8                                   # эмблему не трогаем
+        # эмблема: защищаем не кругом R 4.8, а геометрией самого медальона —
+        # его выступающей частью. Всё вокруг неё заливается в плоскость, поэтому
+        # кольца из впадин у эмблемы не остаётся.
+        med = ((np.abs(py) < 11.0) & (np.abs(pz - 26.0) < 8.0)
+               & (V[:, 0] > L + 0.10 * U))
+        if med.any():
+            from scipy.spatial import cKDTree
+            dmed = cKDTree(np.stack([py[med], pz[med]], 1)).query(
+                np.stack([py, pz], 1))[0]
+            inside &= dmed > max(a.squash_oval_margin_mm, 0.0)
 
         def _ss(t):
             t = np.clip(t, 0.0, 1.0)
             return t * t * (3.0 - 2.0 * t)
+
+        def _ss5(t):          # smootherstep: без изломов на концах перехода
+            t = np.clip(t, 0.0, 1.0)
+            return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
         # вес сдвига: 1 в глубине участка, плавно к нулю у контура закраски и у границ
+        edge = max(float(a.squash_edge_mm), 1e-6)
         w = (_ss(dist[ii, jj] / max(a.squash_falloff_mm, 1e-6))
              * _ss((30.6 - pz) / zt) * _ss((pz - 22.3) / zt)
-             * _ss((a.squash_y_max - np.abs(py)) / 1.4)
+             * _ss((a.squash_y_max - np.abs(py)) / edge)
              * _ss(((a.squash_mm + 0.9) * U - V[:, 0]) / (0.7 * U))
              * _ss((V[:, 0] - (a.squash_mm - a.squash_depth_mm) * U) / (1.5 * U)))
         # у самой кромки не поднимаем то, что лежит глубоко: иначе на торцах, где
