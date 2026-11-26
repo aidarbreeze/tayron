@@ -629,8 +629,6 @@ export function initSculpt(opts) {
   let rectStart = null;     // рамка: экранные координаты начала протяжки
   let rectLast = null;
   let rectSel = null;       // последняя рамка: {x0,y0,x1,y1} в пикселях
-  /* зеркальная копия: та же сетка треугольников, что и для проекции */
-  let rayTris = [], rayGrid = new Map(), rayCell = 12;
   let regFromRect = false;  // выделение поставлено рамкой (а не кистью)
   let sym = false;          // симметрия по y = 0
   let frontOnly = true;     // трогать только видимую (лицевую) поверхность
@@ -1103,71 +1101,57 @@ export function initSculpt(opts) {
     return n;
   }
 
-  /** Расстояние от точки до треугольника (a, b, c — плоские массивы по 3). */
-  function pointTri(x, y, z, A, B, C) {
-    const e1x = B[0] - A[0], e1y = B[1] - A[1], e1z = B[2] - A[2];
-    const e2x = C[0] - A[0], e2y = C[1] - A[1], e2z = C[2] - A[2];
-    const dx = x - A[0], dy = y - A[1], dz = z - A[2];
-    const a00 = e1x * e1x + e1y * e1y + e1z * e1z;
-    const a01 = e1x * e2x + e1y * e2y + e1z * e2z;
-    const a11 = e2x * e2x + e2y * e2y + e2z * e2z;
-    const b0 = dx * e1x + dy * e1y + dz * e1z;
-    const b1 = dx * e2x + dy * e2y + dz * e2z;
-    const den = a00 * a11 - a01 * a01;
-    let u = 0, v = 0;
-    if (Math.abs(den) > 1e-12) {
-      u = (a11 * b0 - a01 * b1) / den;
-      v = (a00 * b1 - a01 * b0) / den;
-      u = Math.max(0, Math.min(1, u));
-      v = Math.max(0, Math.min(1, v));
-      if (u + v > 1) { const t = u + v; u /= t; v /= t; }
-    }
-    const qx = A[0] + e1x * u + e2x * v, qy = A[1] + e1y * u + e2y * v, qz = A[2] + e1z * u + e2z * v;
-    const ex = x - qx, ey = y - qy, ez = z - qz;
-    return { d2: ex * ex + ey * ey + ez * ez, x: qx, y: qy, z: qz };
-  }
-
-  /** Пересечение луча (x,y,z) + t·(nx,ny,nz) с зеркальными треугольниками T.
-      Возвращает [px, py, pz, |t|] ближайшего попадания или null. */
-  function raySurface(x, y, z, nx, ny, nz, maxD) {
-    const ix = Math.floor(x / rayCell), iy = Math.floor(y / rayCell), iz = Math.floor(z / rayCell);
-    const steps = Math.ceil(maxD / rayCell) + 1;
-    let bestD = Infinity, best = null;
-    for (let dx = -steps; dx <= steps; dx++) {
-      for (let dy = -steps; dy <= steps; dy++) {
-        for (let dz = -steps; dz <= steps; dz++) {
-          const a = rayGrid.get((ix + dx + 500) * 1000000 + (iy + dy + 500) * 1000 + (iz + dz + 500));
-          if (!a) continue;
-          for (const k of a) {
-            const t = rayTris[k];
-            const agree = t.n[0] * nx + t.n[1] * ny + t.n[2] * nz;
-            if (agree < 0.5) continue;
-            const den = t.n[0] * nx + t.n[1] * ny + t.n[2] * nz;
-            if (!den) continue;
-            const tt = ((t.A[0] - x) * t.n[0] + (t.A[1] - y) * t.n[1] + (t.A[2] - z) * t.n[2]) / den;
-            const ad = Math.abs(tt);
-            if (ad > maxD || ad >= bestD) continue;
-            const px = x + nx * tt, py = y + ny * tt, pz = z + nz * tt;
-            const r = pointTri(px, py, pz, t.A, t.B, t.C);
-            if (r.d2 > 1e-6) continue;              // точка вне треугольника
-            bestD = ad; best = [px, py, pz, ad];
-          }
+  /** Убрать грани с нулевой площадью и с двойным направленным ребром, дырку
+      зашить: после вставки копии на кромке остаётся десяток таких граней. */
+  function repairSeam(rounds = 6) {
+    let fixed = 0;
+    for (let r = 0; r < rounds; r++) {
+      const dir = new Map();
+      const dupe = new Set();
+      for (let i = 0; i < liveIndex.length; i += 3) {
+        const a = canon[liveIndex[i]], b = canon[liveIndex[i + 1]], c = canon[liveIndex[i + 2]];
+        for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+          const k = p * 1000000 + q;
+          const was = dir.get(k);
+          if (was) dupe.add(k);
+          dir.set(k, 1);
         }
       }
+      const bad = new Uint8Array(vk);
+      let nbad = 0;
+      for (let i = 0; i < liveIndex.length; i += 3) {
+        const a = canon[liveIndex[i]], b = canon[liveIndex[i + 1]], c = canon[liveIndex[i + 2]];
+        const ao = a * 3, bo = b * 3, co = c * 3;
+        const e1x = pos[bo] - pos[ao], e1y = pos[bo + 1] - pos[ao + 1], e1z = pos[bo + 2] - pos[ao + 2];
+        const e2x = pos[co] - pos[ao], e2y = pos[co + 1] - pos[ao + 1], e2z = pos[co + 2] - pos[ao + 2];
+        let badTri = Math.hypot(e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x) * 0.5 < 1e-9;
+        if (!badTri) {
+          for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+            if (dupe.has(p * 1000000 + q)) { badTri = true; break; }
+          }
+        }
+        if (!badTri) continue;
+        for (const v of [a, b, c]) if (!bad[v]) { bad[v] = 1; nbad++; }
+      }
+      if (!nbad) break;
+      const res = deleteAndFill(topo, liveIndex, pos, bad);
+      setIndex(res.index);
+      fixed += nbad;
     }
-    return best;
+    return fixed;
   }
 
-  /** Зеркальная копия выделения на другую сторону кузова.
-      Копируется ПОВЕРХНОСТЬ, а не отдельные вершины: каждая вершина цели
-      проецируется на зеркальную поверхность выделения (ближайшая точка
-      треугольника), поэтому плотность сетки слева и справа может быть разной —
-      левая сторона всё равно ложится ровно на зеркало правой. Топология не
-      меняется, сетка остаётся замкнутой. */
+  /* ---------- зеркальная копия: вырезать другую сторону и вставить копию ----------
+     Это не подтягивание соседних вершин к зеркалу, а замена: часть другой стороны
+     внутри зеркальной рамки удаляется, на её место встаёт полная копия выделенной
+     части (свои вершины и треугольники), а кромка копии привязывается к ближайшим
+     оставшимся вершинам — сетка остаётся замкнутой. */
   function mirrorCopy() {
     if (!regionN) { syncInfo('сначала выделите рамкой часть одной стороны кузова'); return 0; }
+    const vn = getNormals();
     let sumY = 0, n = 0;
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    let snx = 0, sny = 0, snz = 0;
     for (let v = 0; v < vk; v++) {
       if (!reg[v] || dead[v]) continue;
       const o = v * 3;
@@ -1176,175 +1160,187 @@ export function initSculpt(opts) {
       if (pos[o] > maxX) maxX = pos[o];
       if (pos[o + 2] < minZ) minZ = pos[o + 2];
       if (pos[o + 2] > maxZ) maxZ = pos[o + 2];
+      snx += vn[o]; sny += vn[o + 1]; snz += vn[o + 2];
     }
     if (!n) { syncInfo('в рамке нет живых вершин'); return 0; }
     const side = sumY / n > 0 ? 1 : -1;
+    const snl = Math.hypot(snx, sny, snz) || 1;
+    /* наружная нормаль копии: у выделенной стороны она зеркальна */
+    const sx2 = snx / snl, sy2 = -sny / snl, sz2 = snz / snl;
 
-    /* зеркальные треугольники выделения */
-    const T = [];                    // зеркальные треугольники + их наружная нормаль
-    const pt = (v) => {
-      const o = v * 3;
-      return [pos[o], -pos[o + 1], pos[o + 2]];
-    };
+    /* 1. что копируем — грани выделения, у которых все три узла в области */
+    const patch = [];
+    const inPatch = new Uint8Array(count);
     for (let f = 0; f < liveIndex.length; f += 3) {
-      const a = canon[liveIndex[f]], b = canon[liveIndex[f + 1]], c = canon[liveIndex[f + 2]];
-      if (!(reg[a] && reg[b] && reg[c])) continue;
-      if (dead[a] || dead[b] || dead[c]) continue;
-      if (((pos[a * 3 + 1] > 0) ? 1 : -1) !== side) continue;
-      /* нормаль считаем по исходной стороне (наружу), потом зеркалим */
-      const A = [pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]];
-      const B = [pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]];
-      const C = [pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]];
-      const e1 = [B[0] - A[0], B[1] - A[1], B[2] - A[2]];
-      const e2 = [C[0] - A[0], C[1] - A[1], C[2] - A[2]];
-      let nx = e1[1] * e2[2] - e1[2] * e2[1];
-      let ny = e1[2] * e2[0] - e1[0] * e2[2];
-      let nz = e1[0] * e2[1] - e1[1] * e2[0];
-      const nl = Math.hypot(nx, ny, nz) || 1;
-      T.push({ A: pt(a), B: pt(b), C: pt(c), n: [nx / nl, -ny / nl, nz / nl] });
+      const a = liveIndex[f], b = liveIndex[f + 1], c = liveIndex[f + 2];
+      const na = canon[a], nb = canon[b], nc = canon[c];
+      if (!reg[na] || !reg[nb] || !reg[nc]) continue;
+      if (dead[na] || dead[nb] || dead[nc]) continue;
+      if (((pos[na * 3 + 1] > 0) ? 1 : -1) !== side) continue;
+      if (((pos[nb * 3 + 1] > 0) ? 1 : -1) !== side) continue;
+      if (((pos[nc * 3 + 1] > 0) ? 1 : -1) !== side) continue;
+      patch.push(a, b, c);
+      inPatch[a] = 1; inPatch[b] = 1; inPatch[c] = 1;
     }
-    if (!T.length) { syncInfo('в выделении нет целых треугольников — растяните рамку'); return 0; }
+    if (!patch.length) { syncInfo('в выделении нет целых граней — растяните рамку'); return 0; }
 
-    /* сетка по треугольникам (ключ — ячейка центроида) */
-    const cell = 12;
-    const pad = Math.max(brushR(), cell * 2);      // «Радиус»
-    const kOf = (x, y, z) => (Math.floor(x / cell) + 500) * 1000000 +
-      (Math.floor(y / cell) + 500) * 1000 + Math.floor(z / cell) + 500;
-    const grid = new Map();
-    for (let k = 0; k < T.length; k++) {
-      const { A, B, C } = T[k];
-      const cx = (A[0] + B[0] + C[0]) / 3, cy = (A[1] + B[1] + C[1]) / 3, cz = (A[2] + B[2] + C[2]) / 3;
-      const key = kOf(cx, cy, cz);
-      let a = grid.get(key);
-      if (!a) grid.set(key, a = []);
-      a.push(k);
-    }
-    const ring = Math.ceil(pad / cell) + 1;
-    rayTris = T; rayGrid = grid; rayCell = cell;
-    /* проекция на зеркальную поверхность; треугольники «не той» стороны
-       (нормаль расходится с нормалью вершины больше 60°) не берём — иначе
-       крыша или пол, попавшие в габарит выделения, прилипали бы к борту */
-    function project(x, y, z, nx, ny, nz, maxD) {
-      const ix = Math.floor(x / cell), iy = Math.floor(y / cell), iz = Math.floor(z / cell);
-      let bd = maxD * maxD, best = null;
-      for (let dx = -ring; dx <= ring; dx++) {
-        for (let dy = -ring; dy <= ring; dy++) {
-          for (let dz = -ring; dz <= ring; dz++) {
-            const a = grid.get((ix + dx + 500) * 1000000 + (iy + dy + 500) * 1000 + (iz + dz + 500));
-            if (!a) continue;
-            for (const k of a) {
-              const t = T[k];
-              const agree = t.n[0] * nx + t.n[1] * ny + t.n[2] * nz;
-              if (agree < 0.5) continue;
-              const r = pointTri(x, y, z, t.A, t.B, t.C);
-              if (r.d2 <= bd) { bd = r.d2; best = r; best.nx = t.n[0]; best.ny = t.n[1]; best.nz = t.n[2]; }
-            }
-          }
-        }
-      }
-      return best;
-    }
-
-    /* медиана длины ребра: «насколько близко должна лежать парная поверхность» */
-    const edges = [];
-    for (let f = 0; f < liveIndex.length; f += 3) {
-      const a = canon[liveIndex[f]] * 3, b = canon[liveIndex[f + 1]] * 3;
-      edges.push(Math.hypot(pos[a] - pos[b], pos[a + 1] - pos[b + 1], pos[a + 2] - pos[b + 2]));
-    }
-    edges.sort((a, b) => a - b);
-    const edgeMed = edges.length ? edges[edges.length >> 1] : 2;
-    /* дальше 3 рёбер — это уже другая поверхность (крыша, пол, арка), не пара;
-       дальность поиска при копии — «Радиус» (по умолчанию 6 мм) */
-    const near = Math.max(edgeMed * 3, 1);   // луч не попал — ближняя точка не дальше 3 рёбер
-    const tol = pad;                          // «Радиус»: дальше копия не ищет
-
-    /* цели: другая сторона, в габаритах выделения, не дальше допуска */
-    const vn = getNormals();
-    const plan = [];
-    let far = 0;
+    /* 2. что вырезаем — вершины другой стороны в той же рамке, на той же поверхности */
+    const pad = Math.max(brushR(), 12);
+    const del = new Uint8Array(vk);
+    let delN = 0;
     for (let v = 0; v < vk; v++) {
       if (dead[v]) continue;
       const o = v * 3;
       if (((pos[o + 1] > 0) ? 1 : -1) === side) continue;
       if (pos[o] < minX - pad || pos[o] > maxX + pad) continue;
       if (pos[o + 2] < minZ - pad || pos[o + 2] > maxZ + pad) continue;
-      /* если область выделена рамкой — берём только ту часть другой стороны,
-         зеркало которой попадает в ту же рамку на экране */
       if (regFromRect && !inRectScreen(pos[o], -pos[o + 1], pos[o + 2])) continue;
-      const nl = Math.hypot(vn[o], vn[o + 1], vn[o + 2]);
-      if (!nl) continue;
-      const nx = vn[o] / nl, ny = vn[o + 1] / nl, nz = vn[o + 2] / nl;
-      /* Своя нормаль вершины — направление копии: вершина едет вдоль неё, пока
-         не упрётся в зеркальную поверхность. Так соседние вершины сохраняют
-         порядок (треугольники не схлопываются) и попадают точно на неё. */
-      const ray = raySurface(pos[o], pos[o + 1], pos[o + 2], nx, ny, nz, tol);
-      if (ray) { plan.push(v, ray[0], ray[1], ray[2], ray[3]); continue; }
-      /* луч мимо (кромка, арка) — хотя бы убираем нормальный зазор */
-      const hit = project(pos[o], pos[o + 1], pos[o + 2], nx, ny, nz, near);
-      if (!hit) { far++; continue; }
-      const sd = (pos[o] - hit.x) * hit.nx + (pos[o + 1] - hit.y) * hit.ny +
-        (pos[o + 2] - hit.z) * hit.nz;
-      plan.push(v, pos[o] - hit.nx * sd, pos[o + 1] - hit.ny * sd, pos[o + 2] - hit.nz * sd, Math.abs(sd));
+      const l = Math.hypot(vn[o], vn[o + 1], vn[o + 2]) || 1;
+      if ((vn[o] * sx2 + vn[o + 1] * sy2 + vn[o + 2] * sz2) / l < 0.4) continue;
+      del[v] = 1; delN++;
     }
-    if (!plan.length) {
-      syncInfo(`на другой стороне нет узлов ближе ${(tol / U).toFixed(2)} мм — увеличьте «Радиус» или расширьте рамку`);
-      return 0;
+    if (!delN) { syncInfo('на другой стороне в этой рамке нечего заменять — сдвиньте рамку'); return 0; }
+
+    /* 3. новые вершины — зеркало вершин копируемого участка */
+    const newOf = new Int32Array(count).fill(-1);
+    const addPos = [];
+    let nv = count;
+    for (let i = 0; i < count; i++) {
+      if (!inPatch[i]) continue;
+      newOf[i] = nv++;
+      addPos.push(src[i * 3], -src[i * 3 + 1], src[i * 3 + 2]);
     }
 
-    pushHist();
-    let moved = 0, maxd = 0, sumd = 0, same = 0;
-    const oldPos = new Float32Array(pos.length);      // куда вернуть, если схлопнется грань
-    const wasMoved = new Uint8Array(pos.length / 3);
-    for (let i = 0; i < plan.length; i += 5) {
-      const v = plan[i], o = v * 3, d = plan[i + 4];
-      if (d > maxd) maxd = d;
-      sumd += d;
-      if (d < 1e-4) same++;
-      oldPos[o] = pos[o]; oldPos[o + 1] = pos[o + 1]; oldPos[o + 2] = pos[o + 2];
-      wasMoved[v] = 1;
-      pos[o] = plan[i + 1]; pos[o + 1] = plan[i + 2]; pos[o + 2] = plan[i + 3];
-      moved++;
+    /* 4. индекс: что осталось + грани копии (обход в обратную сторону — зеркало
+          переворачивает ориентацию) */
+    const keep = [];
+    let removedFaces = 0;
+    const edgeUse = new Map();        // рёбра оставшейся части: сколько раз и куда
+    for (let f = 0; f < liveIndex.length; f += 3) {
+      const a = liveIndex[f], b = liveIndex[f + 1], c = liveIndex[f + 2];
+      if (del[canon[a]] || del[canon[b]] || del[canon[c]]) { removedFaces++; continue; }
+      keep.push(a, b, c);
     }
-    /* Грань, у которой после переезда вершин площадь стала нулевой, — возвращаем
-       её вершины на прежние места (на тонких кромках луч идёт почти по
-       поверхности и может уронить вершину в соседнюю). Так копия никогда не
-       ломает сетку. */
-    let reverted = 0;
-    for (let pass = 0; pass < 4; pass++) {
-      let fixed = 0;
-      for (let f = 0; f < liveIndex.length; f += 3) {
-        const a = canon[liveIndex[f]], b = canon[liveIndex[f + 1]], c = canon[liveIndex[f + 2]];
-        if (!wasMoved[a] && !wasMoved[b] && !wasMoved[c]) continue;
-        const ao = a * 3, bo = b * 3, co = c * 3;
-        const e1x = pos[bo] - pos[ao], e1y = pos[bo + 1] - pos[ao + 1], e1z = pos[bo + 2] - pos[ao + 2];
-        const e2x = pos[co] - pos[ao], e2y = pos[co + 1] - pos[ao + 1], e2z = pos[co + 2] - pos[ao + 2];
-        if (Math.hypot(e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x) * 0.5 >= 1e-9) continue;
-        for (const v of [a, b, c]) {
-          if (!wasMoved[v]) continue;
-          const o = v * 3;
-          pos[o] = oldPos[o]; pos[o + 1] = oldPos[o + 1]; pos[o + 2] = oldPos[o + 2];
-          wasMoved[v] = 0; moved--; reverted++;
-        }
-        fixed++;
+    if (!keep.length) { syncInfo('после вырезания ничего не осталось — уменьшите рамку'); return 0; }
+    const vk2 = count + 8;
+    for (let i = 0; i < keep.length; i += 3) {
+      const a = keep[i], b = keep[i + 1], c = keep[i + 2];
+      for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+        const k = p * vk2 + q, kr = q * vk2 + p;
+        if (edgeUse.has(kr)) edgeUse.delete(kr); else edgeUse.set(k, 1);
       }
-      if (!fixed) break;
     }
-    nrm = null; regionFront = null;
+    /* кромка дыры: рёбра, оставшиеся без пары */
+    const hole = [];
+    const holeSeen = new Set();
+    for (const k of edgeUse.keys()) {
+      const p = Math.floor(k / vk2), q = k - p * vk2;
+      for (const v of [p, q]) if (!holeSeen.has(v)) { holeSeen.add(v); hole.push(v); }
+    }
+
+    /* граничные вершины копии: рёбра, встречающиеся в ней один раз */
+    const pEdge = new Map();
+    for (let i = 0; i < patch.length; i += 3) {
+      const a = patch[i], b = patch[i + 1], c = patch[i + 2];
+      for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+        const k = p * vk2 + q, kr = q * vk2 + p;
+        if (pEdge.has(kr)) pEdge.delete(kr); else pEdge.set(k, 1);
+      }
+    }
+    const pBound = [];
+    const pSeen = new Set();
+    for (const k of pEdge.keys()) {
+      const p = Math.floor(k / vk2), q = k - p * vk2;
+      for (const v of [p, q]) if (!pSeen.has(v)) { pSeen.add(v); pBound.push(v); }
+    }
+
+    /* 5. привязка кромки копии к ближайшим вершинам кромки дыры (1:1) */
+    const cell = Math.max(pad, 12);
+    const grid = new Map();
+    const key = (x, y, z) => (Math.floor(x / cell) + 500) * 1000000 +
+      (Math.floor(y / cell) + 500) * 1000 + Math.floor(z / cell) + 500;
+    for (const v of hole) {
+      const o = canon[v] * 3;
+      const k = key(pos[o], pos[o + 1], pos[o + 2]);
+      const a = grid.get(k); if (a) a.push(v); else grid.set(k, [v]);
+    }
+    const pairs = [];
+    for (const v of pBound) {
+      const i = newOf[v];
+      if (i < 0) continue;
+      const o = (i - count) * 3;
+      const px = addPos[o], py = addPos[o + 1], pz = addPos[o + 2];
+      const ix = Math.floor(px / cell), iy = Math.floor(py / cell), iz = Math.floor(pz / cell);
+      let bd = Infinity, bv = -1;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const a = grid.get((ix + dx + 500) * 1000000 + (iy + dy + 500) * 1000 + (iz + dz + 500));
+        if (!a) continue;
+        for (const h of a) {
+          const q = canon[h] * 3;
+          const d = (pos[q] - px) ** 2 + (pos[q + 1] - py) ** 2 + (pos[q + 2] - pz) ** 2;
+          if (d < bd) { bd = d; bv = h; }
+        }
+      }
+      if (bv >= 0) pairs.push([bd, i, bv]);
+    }
+    pairs.sort((a, b) => a[0] - b[0]);
+    const weldOf = new Map();       // новый индекс → вершина оставшейся части
+    const usedHole = new Set();
+    for (const [d, i, h] of pairs) {
+      if (usedHole.has(h) || weldOf.has(i)) continue;
+      weldOf.set(i, h); usedHole.add(h);
+    }
+
+    /* 6. грани копии */
+    for (let i = 0; i < patch.length; i += 3) {
+      const a = newOf[patch[i]], b = newOf[patch[i + 1]], c = newOf[patch[i + 2]];
+      if (a < 0 || b < 0 || c < 0) continue;
+      const A = weldOf.has(a) ? weldOf.get(a) : a;
+      const B = weldOf.has(c) ? weldOf.get(c) : c;
+      const C = weldOf.has(b) ? weldOf.get(b) : b;
+      if (A === B || B === C || C === A) continue;
+      keep.push(A, B, C);
+    }
+
+    /* 7. применить: координаты, индекс, топология заново */
+    pushHist();
+    const nextPos = new Float32Array((count + addPos.length / 3) * 3);
+    nextPos.set(src);
+    nextPos.set(addPos, count * 3);
+    count += addPos.length / 3;
+    applySrc(nextPos);
+    col = new Float32Array(count * 3).fill(1);
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    setIndex(Int32Array.from(keep));
+    topo = buildTopology(src, liveIndex);
+    vk = topo.vk; canon = topo.canon; pos0 = topo.pos0;
+    topo.vk = vk; topo.count = count; topo.pos0 = pos0; topoDirty = false;
+    resizeNodeArrays(Math.max(vk, reg.length, dead.length, added.length));
+    pos = Float32Array.from(pos0);
+    reg.fill(0); dead.fill(0); added.fill(0); pending.fill(0); front.fill(1);
+    regionN = 0; delTotal = 0; regionFront = null; block = null; allow = null; nrm = null;
+
+    /* 8. остатки кромки (где привязка не нашлась) зашиваем треугольниками */
+    const res = deleteAndFill(topo, liveIndex, pos, new Uint8Array(vk));
+    setIndex(res.index);
+    const fixedV = repairSeam();
+
+    free = freeMask(topo, reg);
+    clearDots(); paintMarks(); updateAddedDots();
     flush();
-    const m = checkMesh(topo, liveIndex, src, U);
+    const m = checkMesh(topo, liveIndex, pos, U);
     const bad = m.openEdges + m.flipEdges + m.nonManifold + m.degenerate;
     const sideName = side > 0 ? ['левая', 'правая'] : ['правая', 'левая'];
     if (info) {
-      info.innerHTML = `зеркально скопировано: <b>${moved}</b> вершин ` +
-        `(${sideName[0]} → ${sideName[1]}), макс. сдвиг ${(maxd / U).toFixed(2)} мм, ` +
-        `средний ${(sumd / moved / U).toFixed(2)} мм` +
-        (same ? `, уже совпадало ${same}` : '') +
-        (far ? `, луч мимо у ${far}` : '') +
-        (reverted ? `, на место возвращено ${reverted} (не дали грани схлопнуться)` : '') + ' · сетка ' +
+      info.innerHTML = `скопировано с ${sideName[0]} на ${sideName[1]}: <b>${removedFaces}</b> граней ` +
+        `(${delN} вершин) заменено копией из <b>${patch.length / 3}</b> граней, ` +
+        `новых вершин ${addPos.length / 3}, привязано к ближайшим ${weldOf.size}` +
+        (res.addedFaces ? `, зашито кромкой ${res.addedFaces}` : '') +
+        (fixedV ? `, подчищено ${fixedV}` : '') + ' · сетка ' +
         (bad ? `<span style="color:var(--warn)">⚠ дыр ${m.openEdges}, перевёрнутых ${m.flipEdges}, ` +
           `вырожденных ${m.degenerate}</span>` : 'цела (0 дыр, 0 перевёрнутых, 0 вырожденных)');
     }
-    return moved;
+    return patch.length / 3;
   }
 
   /* ---------- 5. измерение ---------- */
@@ -1558,9 +1554,11 @@ export function initSculpt(opts) {
       'Третий клик начинает новую пару.',
     rect: '<b>Растяните рамку</b> по кузову: стороны строго по осям экрана, выделяются ' +
       'только видимые грани и только та сторона, которой больше в рамке. Дальше ' +
-      '«<b>⇄ Зеркально</b>» — выделенная часть копируется на другую сторону кузова ' +
-      '(y → −y): каждая вершина там встаёт в зеркальную точку выделения. «Радиус» — ' +
-      'насколько далеко искать пару; копия отменяется Ctrl+Z.',
+      '«<b>⇄ Зеркально</b>» — часть другой стороны внутри той же рамки <b>вырезается</b>, ' +
+      'а на её место встаёт <b>полная копия</b> выделенного (свои вершины и грани, ' +
+      'зеркало y → −y); кромка копии привязывается к ближайшим оставшимся вершинам, ' +
+      'щели зашиваются треугольниками — сетка остаётся замкнутой. «Радиус» — в каких ' +
+      'пределах искать эти ближайшие вершины. Копия отменяется Ctrl+Z.',
     point: '<b>Клик или протяжка по кузову</b> — новая точка ровно на существующей ' +
       'грани (грань делится на три, новой поверхности не появляется). Сразу после ' +
       'вставки ближайшие узлы притягиваются к новой точке (перевороты рёбер по ' +
