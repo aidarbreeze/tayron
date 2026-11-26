@@ -371,6 +371,63 @@ function earClip(p2, forbidden = null) {
  * forbidden(i, j) — диагональ, которую ставить нельзя (ребро уже есть в сетке).
  * Возвращает индексы внутри контура или null, если контур нельзя закрыть.
  */
+/**
+ * Триангуляция дыры «по качеству»: максимизируем МИНИМАЛЬНЫЙ угол.
+ * Классический DP по минимуму площади (Лиепа) даёт очень тонкие треугольники —
+ * на ровной панели после ластика их было 140 нулевых. Здесь вес треугольника —
+ * его нормированная форма q = 4√3·S / (a²+b²+c²) (1 — равносторонний), а по
+ * контуру берётся max-min: q[i][j] = max_k min(q(i,k,j), q[i][k], q[k][j]).
+ */
+function qualityTriangulate(loop, pos, forbidden) {
+  const n = loop.length;
+  if (n < 3 || n > 300) return null;
+  const P = (i) => [pos[loop[i] * 3], pos[loop[i] * 3 + 1], pos[loop[i] * 3 + 2]];
+  const pt = [], d = [];
+  for (let i = 0; i < n; i++) pt.push(P(i));
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const q3 = (a, b, c) => {
+    const ab = dist(a, b), bc = dist(b, c), ca = dist(c, a);
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    const S = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
+    const sum = ab * ab + bc * bc + ca * ca;
+    if (!(sum > 1e-18)) return 0;
+    return Math.min(1, (4 * Math.sqrt(3) * S) / sum);
+  };
+  const q = new Float64Array(n * n).fill(-1);
+  const cut = new Int32Array(n * n).fill(-1);
+  for (let i = 0; i + 1 < n; i++) q[i * n + i + 1] = 1;
+  for (let span = 2; span < n; span++) {
+    for (let i = 0; i + span < n; i++) {
+      const j = i + span;
+      /* диагональ (i,j) уже есть в сетке — такое ребро делить нельзя:
+         иначе на нём окажутся три грани (неманифолд) */
+      if (forbidden && j !== i + 1 && !(i === 0 && j === n - 1) && forbidden(i, j)) {
+        q[i * n + j] = -1; continue;
+      }
+      let best = -1, bestK = -1;
+      for (let k = i + 1; k < j; k++) {
+        if (q[i * n + k] < 0 || q[k * n + j] < 0) continue;
+        const v = Math.min(q3(pt[i], pt[k], pt[j]), q[i * n + k], q[k * n + j]);
+        if (v > best) { best = v; bestK = k; }
+      }
+      q[i * n + j] = best; cut[i * n + j] = bestK;
+    }
+  }
+  if (q[0 * n + (n - 1)] < 0) return null;
+  const tris = [];
+  const stack = [[0, n - 1]];
+  while (stack.length) {
+    const [i, j] = stack.pop();
+    const k = cut[i * n + j];
+    if (k < 0) continue;
+    tris.push(i, k, j);
+    if (k - i > 1) stack.push([i, k]);
+    if (j - k > 1) stack.push([k, j]);
+  }
+  return tris.length ? { tris, quality: q[0 * n + (n - 1)] } : null;
+}
+
 function dpTriangulate(loop, pos, forbidden) {
   const n = loop.length;
   if (n < 3) return null;
@@ -422,7 +479,23 @@ function dpTriangulate(loop, pos, forbidden) {
  * Возвращает новый список граней (индексы вершин файла), число дырок и
  * добавленных треугольников.
  */
-export function deleteAndFill(topo, index, pos, deleted, report) {
+/** Рёбра, которые уже были кромкой (один треугольник). Такую «дыру» нельзя
+    зашивать: это честный край открытой оболочки, а не дырка от ластика. */
+export function boundaryEdgeKeys(topo, index) {
+  const { canon } = topo;
+  const cnt = new Map();
+  const add = (a, b) => { const k = a < b ? a * 1e6 + b : b * 1e6 + a; cnt.set(k, (cnt.get(k) || 0) + 1); };
+  for (let i = 0; i < index.length; i += 3) {
+    const a = canon[index[i]], b = canon[index[i + 1]], c = canon[index[i + 2]];
+    if (a === b || b === c || c === a) continue;
+    add(a, b); add(b, c); add(c, a);
+  }
+  const out = new Set();
+  for (const [k, n] of cnt) if (n === 1) out.add(k);
+  return out;
+}
+
+export function deleteAndFill(topo, index, pos, deleted, report, preBoundary = null) {
   const { canon, vk, rep } = topo;
 
   /* Грани, которые остаются, и кромка. Если кромка проходит через вершину
@@ -458,12 +531,25 @@ export function deleteAndFill(topo, index, pos, deleted, report) {
   }
   const patch = [];
   let added = 0;
+  const keyU = (a, b) => (a < b ? a * 1e6 + b : b * 1e6 + a);
   for (const loop of loops) {
+    /* не зашиваем то, что кромкой было и до ластика (край открытой оболочки) */
+    if (preBoundary && preBoundary.size) {
+      let was = false;
+      for (let i = 0; i < loop.length; i++) {
+        if (preBoundary.has(keyU(loop[i], loop[(i + 1) % loop.length]))) { was = true; break; }
+      }
+      if (was) continue;
+    }
     const forb = (i, j) => dirSet.has(loop[i] * vk2 + loop[j]) ||
                            dirSet.has(loop[j] * vk2 + loop[i]);
-    const dp = dpTriangulate(loop, pos, forb);
+    /* сначала — триангуляция по качеству (максимум минимального угла),
+       потом минимум площади, потом уши: первые две дают тонкие треугольники */
+    const qd = qualityTriangulate(loop, pos, forb);
+    const dp = qd && qd.quality > 0.15 ? qd.tris : dpTriangulate(loop, pos, forb);
     const tri = dp || earClip(flattenLoop(loop, pos).p2, forb);
-    if (report) report.push({ loop: loop.length, dp: dp ? dp.length / 3 : 0, tris: tri.length / 3 });
+    if (report) report.push({ loop: loop.length, dp: dp ? dp.length / 3 : 0, tris: tri.length / 3,
+      quality: qd ? +qd.quality.toFixed(3) : 0 });
     if (!tri.length) continue;
     // два варианта обхода, берём тот, что не дублирует уже занятые рёбра
     const score = (flip) => {
@@ -534,13 +620,15 @@ const smooth01 = (t) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
  * amount * smoothstep(1 − d/r). Знак amount — вдавить (минус) или вытянуть.
  * only — маска узлов, которые можно двигать (например, без удалённых).
  */
-export function pushBall(topo, pos, center, r, amount, normals, only) {
+export function pushBall(topo, pos, center, r, amount, normals, only, avg = null) {
   const { vk } = topo;
   let moved = 0, maxd = 0;
   const r2 = r * r;
+  /* Направление кисти. В Blender «Draw» двигает вдоль ПЛОЩАДНОЙ нормали пятна:
+     на перегибе (угол кузова) нормали соседних узлов расходятся на 90°, и сдвиг
+     по своей нормали рвёт поверхность — появляются «иголки». Поэтому смешиваем
+     нормаль узла со средней нормалью кисти: avg = [x,y,z, вес]. */
   for (let v = 0; v < vk; v++) {
-    /* узлы, добавленные сгущением уже после снятия маски, в неё не попали —
-       для них считаем «можно» (они лежат внутри пятна кисти) */
     if (only && v < only.length && !only[v]) continue;
     const o = v * 3;
     const dx = pos[o] - center[0], dy = pos[o + 1] - center[1], dz = pos[o + 2] - center[2];
@@ -549,12 +637,122 @@ export function pushBall(topo, pos, center, r, amount, normals, only) {
     const w = smooth01(1 - Math.sqrt(d2) / r);
     const s = amount * w;
     if (s === 0) continue;
-    pos[o] += normals[o] * s;
-    pos[o + 1] += normals[o + 1] * s;
-    pos[o + 2] += normals[o + 2] * s;
+    let nx = normals[o], ny = normals[o + 1], nz = normals[o + 2];
+    if (avg) {
+      nx += avg[0] * avg[3]; ny += avg[1] * avg[3]; nz += avg[2] * avg[3];
+      const l = Math.hypot(nx, ny, nz) || 1;
+      nx /= l; ny /= l; nz /= l;
+    }
+    pos[o] += nx * s;
+    pos[o + 1] += ny * s;
+    pos[o + 2] += nz * s;
     moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
   }
   return { moved, maxd };
+}
+
+/**
+ * Страховка от выворотов: ни одна грань не должна смотреть «в другую сторону»
+ * после правки. Для каждой такой грани её сдвинутые вершины подтягиваются назад
+ * к исходному положению, пока нормаль не вернётся (или пока сдвиг не станет
+ * пренебрежимым). Это то же, что «clamp» в кистях Blender: лучше недодать
+ * глубину в одном месте, чем сложить поверхность складкой.
+ */
+export function clampFlips(pos, base, index, minDot = 0.05, rounds = 5, minArea = 0.2) {
+  const faceN = index.length / 3;
+  const nb = new Float32Array(faceN * 3);
+  const nA = new Float32Array(faceN);          // площадь «до»
+  const fn = (P, a, b, c, out, o) => {
+    const ax = P[a * 3], ay = P[a * 3 + 1], az = P[a * 3 + 2];
+    const ux = P[b * 3] - ax, uy = P[b * 3 + 1] - ay, uz = P[b * 3 + 2] - az;
+    const vx = P[c * 3] - ax, vy = P[c * 3 + 1] - ay, vz = P[c * 3 + 2] - az;
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    out[o] = nx / l; out[o + 1] = ny / l; out[o + 2] = nz / l;
+  };
+  const area = (P, a, b, c) => {
+    const ax = P[a * 3], ay = P[a * 3 + 1], az = P[a * 3 + 2];
+    const ux = P[b * 3] - ax, uy = P[b * 3 + 1] - ay, uz = P[b * 3 + 2] - az;
+    const vx = P[c * 3] - ax, vy = P[c * 3 + 1] - ay, vz = P[c * 3 + 2] - az;
+    return Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
+  };
+  for (let f = 0; f < faceN; f++) {
+    const a = index[f * 3], b = index[f * 3 + 1], c = index[f * 3 + 2];
+    fn(base, a, b, c, nb, f * 3);
+    nA[f] = area(base, a, b, c);
+  }
+  let touched = 0, left = 0;
+  for (let r = 0; r < rounds; r++) {
+    let bad = 0;
+    for (let f = 0; f < faceN; f++) {
+      const a = index[f * 3], b = index[f * 3 + 1], c = index[f * 3 + 2];
+      const cur = new Float32Array(3);
+      fn(pos, a, b, c, cur, 0);
+      const d = cur[0] * nb[f * 3] + cur[1] * nb[f * 3 + 1] + cur[2] * nb[f * 3 + 2];
+      /* вывернули ИЛИ сжали почти в ноль (тонкая «иголка» — та же складка,
+         только её не видно по знаку нормали) */
+      const shrunk = nA[f] > 1e-12 && area(pos, a, b, c) < minArea * nA[f];
+      if (d >= minDot && !shrunk) continue;
+      bad++;
+      for (const v of [a, b, c]) {
+        const o = v * 3;
+        if (o + 2 >= base.length) continue;      // узел появился после снимка — нечего подрезать
+        pos[o] = base[o] + (pos[o] - base[o]) * 0.5;
+        pos[o + 1] = base[o + 1] + (pos[o + 1] - base[o + 1]) * 0.5;
+        pos[o + 2] = base[o + 2] + (pos[o + 2] - base[o + 2]) * 0.5;
+      }
+      if (r === 0) touched++;
+    }
+    left = bad;
+    if (!bad) break;
+  }
+  return { touched, left };
+}
+
+/** Средняя длина ребра внутри области (для перевода «колец» в мм). */
+function softWidth(topo, reg, pos, soft) {
+  const { off, nbr } = topo;
+  let sum = 0, n = 0;
+  for (let v = 0; v < reg.length; v++) {
+    if (!reg[v]) continue;
+    for (let k = off[v]; k < off[v + 1]; k++) {
+      const u = nbr[k];
+      if (!reg[u] || u < v) continue;
+      sum += Math.hypot(pos[v * 3] - pos[u * 3], pos[v * 3 + 1] - pos[u * 3 + 1], pos[v * 3 + 2] - pos[u * 3 + 2]);
+      n++;
+    }
+  }
+  const e = n ? sum / n : 1;
+  return Math.max(e * soft, e * 1.5);
+}
+
+/**
+ * Плавный вход в область по РАССТОЯНИЮ, а не по числу колец графа: на изогнутой
+ * поверхности кольца идут неравномерно, и «Выдавить» давало бугристый профиль
+ * (на торе глубина 0.74 → 0.84 → 0.52 вместо плавного спада). Вес зависит от
+ * расстояния до кромки области: 0 на кромке, 1 глубже R.
+ */
+export function euclidFalloff(topo, pos, reg, R) {
+  const { vk } = topo;
+  const w = new Float32Array(vk);
+  const edge = [];
+  for (let v = 0; v < vk; v++) if (!reg[v]) edge.push(v);
+  const R2 = R * R;
+  for (let v = 0; v < vk; v++) {
+    if (!reg[v]) continue;
+    const o = v * 3;
+    let best = Infinity;
+    for (const u of edge) {
+      const q = u * 3;
+      const dx = pos[q] - pos[o], dy = pos[q + 1] - pos[o + 1], dz = pos[q + 2] - pos[o + 2];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < best) best = d2;
+    }
+    if (!isFinite(best)) { w[v] = 1; continue; }
+    const t = Math.min(1, Math.sqrt(best) / R);
+    w[v] = t * t * (3 - 2 * t);
+  }
+  return w;
 }
 
 /**
@@ -563,7 +761,8 @@ export function pushBall(topo, pos, center, r, amount, normals, only) {
  */
 export function offsetRegion(topo, pos, reg, amount, normals, soft = 4) {
   const { vk } = topo;
-  const w = boundaryFalloff(topo, reg, soft);
+  /* ширина входа в единицах модели: soft «колец» × средняя длина ребра области */
+  const w = euclidFalloff(topo, pos, reg, softWidth(topo, reg, pos, soft));
   /* Нормируем затухание так, чтобы самая глубокая точка области уходила ровно
      на amount: иначе на небольшой закраске кромка съедает половину глубины и
      «Выдавить на 0.8 мм» даёт 0.4. Если область — узкая полоса в одно кольцо
@@ -667,9 +866,11 @@ export function imprintShape(topo, pos, shape, amount, normals, only = null) {
       s = -amount * smooth01(t);
     }
     if (s === 0) continue;
-    pos[o] += normals[o] * s;
-    pos[o + 1] += normals[o + 1] * s;
-    pos[o + 2] += normals[o + 2] * s;
+    /* штамп идёт вдоль ОДНОЙ нормали (нормали фигуры): на угле кузова сдвиг по
+       своим нормалям растягивает и рвёт поверхность — получались «иголки» */
+    pos[o] += nx * s;
+    pos[o + 1] += ny * s;
+    pos[o + 2] += nz * s;
     moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
   }
   return { moved, maxd };
@@ -826,9 +1027,13 @@ export function mirrorDeltas(topo, pos, before, tol = 2.5) {
 export function checkMesh(topo, index, pos, U = 5.8824) {
   const nf = index.length / 3;
   const dir = new Map();
+  /* Рёбра считаем по СКЛЕЕННЫМ узлам (canon), а не по номерам файла вершин:
+     в 3MF/GLB на швах и стыках граней часто лежат дубли вершин, и проверка по
+     номерам объявляла такую сетку «незакрытой» (куб 10×10: 96 ложных дыр). */
+  const cn = (i) => (topo && topo.canon && i < topo.canon.length ? topo.canon[i] : i);
   let degen = 0, volume6 = 0;
   for (let i = 0; i < index.length; i += 3) {
-    const a = index[i], b = index[i + 1], c = index[i + 2];
+    const a = cn(index[i]), b = cn(index[i + 1]), c = cn(index[i + 2]);
     const ao = a * 3, bo = b * 3, co = c * 3;
     const ax = pos[ao], ay = pos[ao + 1], az = pos[ao + 2];
     const bx = pos[bo], by = pos[bo + 1], bz = pos[bo + 2];

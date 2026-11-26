@@ -28,7 +28,8 @@ import { meshTo3mf, meshToSTL, downloadBytes } from './export3mf.js';
 import {
   buildTopology, freeMask, smoothDiffuse, boundaryFalloff, paintBall,
   expandToVertices, deleteAndFill, compactMesh, vertexNormals,
-  pushBall, offsetRegion, imprintShape, flattenRegion, sharpenRegion,
+  pushBall, offsetRegion, imprintShape, flattenRegion, sharpenRegion, clampFlips, boundaryEdgeKeys,
+  euclidFalloff,
   mirrorDeltas, checkMesh
 } from './meshops.js';
 
@@ -207,7 +208,14 @@ export function initSculpt(opts) {
     const w = (d00 * d21 - d01 * d20) / den;
     const u = 1 - v - w;
     const e = 0.15;                       // не ближе 15 % к вершинам грани
-    if (u < e || v < e || w < e) return { ok: false, why: 'слишком близко к вершине' };
+    if (u < e || v < e || w < e) {
+      /* Клик у кромки: делить грань на три нельзя (иголка), но и отказывать
+         нельзя — в настоящих редакторах точка встаёт всегда. Расщепляем
+         ближайшее ребро: с каждой стороны кромки получаются два ровных
+         треугольника, шов остаётся склеенным. */
+      const pair = u <= v && u <= w ? [i1, i2] : (v <= w ? [i2, i0] : [i0, i1]);
+      return splitEdgeAt(pair[0], pair[1], p, doFlips);
+    }
     const px = ax * u + bx * v + cx * w;   // точка ровно на грани
     const py = ay * u + by * v + cy * w;
     const pz = az * u + bz * v + cz * w;
@@ -243,6 +251,71 @@ export function initSculpt(opts) {
     added[node] = 1;
     topoDirty = true; nrm = null;
     return { ok: true, node };
+  }
+
+  /** Расщепить ребро (a,b) в точке p — путь «Точки» у кромки грани.
+      Обе грани, которым принадлежит ребро, делятся пополам, поэтому шов не
+      расходится (никаких T-стыков) и вода не течёт. */
+  function splitEdgeAt(a, b, p, doFlips = true) {
+    const P = src;
+    const ax = P[a * 3], ay = P[a * 3 + 1], az = P[a * 3 + 2];
+    const bx = P[b * 3], by = P[b * 3 + 1], bz = P[b * 3 + 2];
+    const ex = bx - ax, ey = by - ay, ez = bz - az;
+    const L2 = ex * ex + ey * ey + ez * ez;
+    if (L2 < 1e-12) return { ok: false, why: 'нулевое ребро' };
+    let t = ((p[0] - ax) * ex + (p[1] - ay) * ey + (p[2] - az) * ez) / L2;
+    t = Math.min(0.88, Math.max(0.12, t));      // не вырождаемся в вершину
+    const px = ax + ex * t, py = ay + ey * t, pz = az + ez * t;
+
+    const li = liveIndex, m = li.length / 3, hit = new Map();
+    for (let f = 0; f < m; f++) {
+      const i0 = li[f * 3], i1 = li[f * 3 + 1], i2 = li[f * 3 + 2];
+      for (let k = 0; k < 3; k++) {
+        const x = k === 0 ? i0 : k === 1 ? i1 : i2;
+        const y = k === 0 ? i1 : k === 1 ? i2 : i0;
+        const z = k === 0 ? i2 : k === 1 ? i0 : i1;
+        if ((x === a && y === b) || (x === b && y === a)) hit.set(f, [x, y, z]);
+      }
+    }
+    if (!hit.size) return { ok: false, why: 'ребро не найдено' };
+
+    const nv = count;
+    const newSrc = new Float32Array((count + 1) * 3);
+    newSrc.set(src);
+    newSrc[nv * 3] = px; newSrc[nv * 3 + 1] = py; newSrc[nv * 3 + 2] = pz;
+    count += 1;
+    applySrc(newSrc);
+    const newCol = new Float32Array(count * 3).fill(1);
+    newCol.set(col); col = newCol;
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+
+    const ni = new Int32Array((m + hit.size) * 3);
+    let o = 0;
+    for (let f = 0; f < m; f++) {
+      const h = hit.get(f);
+      if (!h) {
+        ni[o++] = li[f * 3]; ni[o++] = li[f * 3 + 1]; ni[o++] = li[f * 3 + 2];
+        continue;
+      }
+      const [x, y, z] = h;                       // x→y — направленное ребро
+      ni[o++] = x; ni[o++] = nv; ni[o++] = z;    // (x, nv, z)
+      ni[o++] = nv; ni[o++] = y; ni[o++] = z;    // (nv, y, z)
+    }
+    setIndex(ni.subarray(0, o));
+    if (doFlips) attachNeighbours(nv, 8, liveIndex);
+
+    resizeNodeArrays(vk + 1);
+    const node = vk;
+    const nc = new Int32Array(count); nc.set(canon); nc[count - 1] = node;
+    canon = nc;
+    const nr = new Int32Array(vk + 1); nr.set(topo.rep); nr[node] = nv;
+    vk += 1;
+    topo.canon = canon; topo.rep = nr; topo.vk = vk; topo.count = count; topo.pos0 = pos0;
+    pos[node * 3] = px; pos[node * 3 + 1] = py; pos[node * 3 + 2] = pz;
+    pos0[node * 3] = px; pos0[node * 3 + 1] = py; pos0[node * 3 + 2] = pz;
+    added[node] = 1;
+    topoDirty = true; nrm = null;
+    return { ok: true, node, split: true };
   }
 
   /* ---------- привязка соседей: локальные перевороты рёбер ----------
@@ -831,9 +904,39 @@ export function initSculpt(opts) {
       pos[o + 2] = penBase[o + 2] + dz * k;
     }
   }
+  /** Шаг сетки под кистью: примерно 8 узлов поперёк пятна и не грубее глубины.
+      Кисть меньше грани иначе двигает одну точку — получается «шип». */
+  function detailFor(r) {
+    return Math.max(r / 4, 0.12 * U);
+  }
+  /** Перед правкой сгустить пятно кисти (иначе на грубой сетке правки нет). */
+  function ensureDetail(c, r, budget = 3000) {
+    const n = refineSphere(c, r * 1.25, detailFor(r), budget);
+    if (n) { ensureTopo(); nrm = null; }
+    return n;
+  }
+  /** Средняя нормаль под кистью: направление, вдоль которого двигаем всё пятно
+      (в Blender это «area normal»). Возвращает [x,y,z,вес] для pushBall. */
+  function brushNormal(c, r) {
+    const n = getNormals(), R = r * r;
+    let nx = 0, ny = 0, nz = 0;
+    for (let v = 0; v < vk; v++) {
+      const o = v * 3;
+      const dx = pos[o] - c[0], dy = pos[o + 1] - c[1], dz = pos[o + 2] - c[2];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > R) continue;
+      const t = Math.max(0, 1 - Math.sqrt(d2) / r);
+      const w = t * t * (3 - 2 * t);
+      nx += n[o] * w; ny += n[o + 1] * w; nz += n[o + 2] * w;
+    }
+    const l = Math.hypot(nx, ny, nz);
+    if (!(l > 1e-9)) return null;
+    return [nx / l, ny / l, nz / l, 2.0];      // 2.0 — вес против нормали узла
+  }
   function penAt(c, sign) {
     if (++penTicks % 8 === 0) nrm = null;
-    const res = pushBall(topo, pos, c, brushR(), sign * depthD(), getNormals(), allow || block || dead);
+    const res = pushBall(topo, pos, c, brushR(), sign * depthD(), getNormals(), allow || block || dead,
+                         brushNormal(c, brushR()));
     if (!res.moved) {                     // кисть мельче сетки — двигаем одну точку
       const v = nearestNodeNear(c, allow ? null : block, brushR() * 1.6);
       if (v >= 0) {
@@ -851,6 +954,7 @@ export function initSculpt(opts) {
     const c = hitPoint(clientX, clientY);
     if (!c) return 0;
     const m = penAt(c, sign) + (sym ? penAt([c[0], -c[1], c[2]], sign) : 0);
+    if (m) clampFlips(pos, penBase, topo.tris);
     clampPenStroke();
     nrm = null;                            // нормали после обрезки другие
     return m;
@@ -981,9 +1085,22 @@ export function initSculpt(opts) {
 
   function shapeAt(c, sign) {
     const brush = brushR();
-    /* 1) в месте касания строим точки по размеру кисти … */
-    const spacing = Math.max(brush / 4.5, 0.10 * U);
-    const refined = refineAt(c, brush * 1.15, spacing);
+    /* 1) в месте касания строим точки по размеру кисти. Сгущение — бисекцией
+       самых длинных рёбер (как у пера): вставка точки «поближе к центру кисти»
+       кучковала узлы и оставляла тонкие треугольники (aspect 78 на кубе). */
+    /* шаг — не грубее половины глубины: иначе стенка штампа «складывается»
+       в иголки (на кубе аспект треугольников доходил до 374) */
+    const spacing = Math.max(0.10 * U, Math.min(brush / 4.5, depthD() * 0.5));
+    const refined = refineSphere(c, brush * 1.15, spacing, 6000);
+    if (refined) { ensureTopo(); nrm = null; }
+    /* новые точки должны попасть в маску «можно» этого штриха */
+    if (refined) {
+      const m = new Uint8Array(vk);
+      if (allow && allow.length) for (let v = 0; v < vk; v++) m[v] = v < allow.length ? allow[v] : 1;
+      else m.fill(1);
+      for (let v = 0; v < vk; v++) if (added[v] && !m[v]) m[v] = 1;
+      allow = m; block = null;
+    }
     const n = getNormals();
     let nx = 0, ny = 0, nz = 0, wsum = 0;
     const R = brushR(), r2 = R * R;
@@ -1002,8 +1119,10 @@ export function initSculpt(opts) {
       size: { r: R, h: Math.max(R * 0.8, depthD()), a: R * 0.8, b: R * 0.8 },
       band: Math.max(R * 0.12, spacing * 0.5)      // узкая кромка — штамп жёсткий
     };
+    const pre = Float32Array.from(pos);        // снимок ПОСЛЕ сгущения (узлы уже есть)
     const res = imprintShape(topo, pos, shape, sign * depthD(), n, allow);
-    return { ...res, refined };
+    clampFlips(pos, pre, topo.tris);
+    return { ...res, refined, pre };
   }
   /* Штрих фигурой: ведёте с зажатой кнопкой — штампы встают вдоль следа с шагом
      0.9 радиуса кисти. Каждый штамп на кузове — это сгущение сетки (0.1–0.6 с),
@@ -1123,7 +1242,17 @@ export function initSculpt(opts) {
     if (dist < 1e-6) return [];
     const n = Math.max(2, Math.min(160, Math.ceil(dist / Math.max(1.0 * U, dist / 160))));
     const pts = [], nrms = [];
-    const nrm = new THREE.Vector3(0, 1, 0);
+    /* Стартовое направление лучей — нормаль поверхности ПОД КУРСОРОМ. Раньше
+       было жёстко (0,1,0): на левом борту кузова путь начинался на правом,
+       и борозда резалась не там, где провели линию. */
+    const vn0 = getNormals();
+    const nvStart = nearestNode(a);
+    let sx = 0, sy = 1, sz = 0;
+    if (nvStart >= 0) {
+      const l = Math.hypot(vn0[nvStart * 3], vn0[nvStart * 3 + 1], vn0[nvStart * 3 + 2]);
+      if (l > 1e-9) { sx = vn0[nvStart * 3] / l; sy = vn0[nvStart * 3 + 1] / l; sz = vn0[nvStart * 3 + 2] / l; }
+    }
+    const nrm = new THREE.Vector3(sx, sy, sz);
     let first = true;
     for (let i = 1; i <= n; i++) {
       const target = new THREE.Vector3().copy(A).addScaledVector(seg, i / n);
@@ -1169,10 +1298,35 @@ export function initSculpt(opts) {
      Ступенями: сначала широкая и грубая зона, потом узкая и мелкая — иначе на
      краю полосы остаются длинные «веера» из больших граней и кромка рвётся. */
   function refineBand(pts, r, spacing, budget = 14000) {
+    /* Первая ступень должна ДОТЯНУТЬСЯ до полосы: если сетка крупнее полосы
+       (плита 8 мм, а желоб 1 мм), рёбра вообще не попадают в отбор, и борозда
+       молча не делается. Поэтому грубая ступень шире местного ребра. */
+    let eMax = spacing * 4;
+    {
+      let bx0 = Infinity, by0 = Infinity, bz0 = Infinity, bx1 = -Infinity, by1 = -Infinity, bz1 = -Infinity;
+      for (const q of pts) {
+        if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0];
+        if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1];
+        if (q[2] < bz0) bz0 = q[2]; if (q[2] > bz1) bz1 = q[2];
+      }
+      const pad = r * 6 + 4;
+      for (let i = 0; i < liveIndex.length; i += 3) {
+        const a = liveIndex[i], b = liveIndex[i + 1], c = liveIndex[i + 2];
+        const inside = (v) => src[v * 3] >= bx0 - pad && src[v * 3] <= bx1 + pad &&
+          src[v * 3 + 1] >= by0 - pad && src[v * 3 + 1] <= by1 + pad &&
+          src[v * 3 + 2] >= bz0 - pad && src[v * 3 + 2] <= bz1 + pad;
+        if (!inside(a) || !inside(b) || !inside(c)) continue;
+        const e = (i1, i2) => Math.hypot(src[i1 * 3] - src[i2 * 3], src[i1 * 3 + 1] - src[i2 * 3 + 1],
+                                         src[i1 * 3 + 2] - src[i2 * 3 + 2]);
+        const m = Math.max(e(a, b), e(b, c), e(c, a));
+        if (m > eMax) eMax = m;
+      }
+    }
     /* r — радиус желоба: кромку режем по нему во всех ступенях, а отбор делаем
        шире и грубее к краю, чтобы не было «вееров» из больших граней */
     const stages = [
-      { r: r * 3.2, s: spacing * 8 },
+      { r: Math.max(r * 3.2, eMax * 1.3), s: Math.max(spacing * 8, eMax / 2) },
+      { r: Math.max(r * 3.2, eMax * 0.8), s: Math.max(spacing * 4, eMax / 4) },
       { r: r * 2.3, s: spacing * 4 },
       { r: r * 1.6, s: spacing * 2 },
       { r: r * 1.1, s: spacing },
@@ -1205,7 +1359,8 @@ export function initSculpt(opts) {
       /* 1) какие рёбра делим: внутри полосы — по длине, на кромке — в точке
             касания (даёт ровный край желоба) */
       const cuts = new Map();               // key → [x,y,z] новой вершины
-      const keyOf = (a, b) => (a < b ? a * 1e6 + b : b * 1e6 + a);
+      /* ключ по каноническим узлам: швы 3MF/GLB иначе делятся дважды */
+      const keyOf = (a, b) => { const ca = canon[a], cb = canon[b]; return ca < cb ? ca * 1e6 + cb : cb * 1e6 + ca; };
       /* точки разрезов не должны совпадать с соседними — иначе нулевые рёбра */
       const cellC = 0.25;
       const cGrid = new Map();
@@ -1226,6 +1381,18 @@ export function initSculpt(opts) {
         const A = pt(ia), B = pt(ib);
         if (far(A) && far(B)) return;
         const da = distToPath(pts, A), db = distToPath(pts, B);
+        /* ребро может целиком лежать СНАРУЖИ полосы, но пересекать её
+           (крупная грань поперёк желоба): смотрим расстояние от середины
+           и от четвертей ребра до пути */
+        if (da > r2 && db > r2) {
+          let near = Infinity;
+          for (const t of [0.5, 0.25, 0.75, 0.125, 0.375, 0.625, 0.875]) {
+            const q = distToPath(pts, lerp3(A, B, t));
+            if (q < near) near = q;
+            if (near <= r2) break;
+          }
+          if (near > r2) return;                            // ребро далеко от полосы
+        }
         const rimA = da <= rr2, rimB = db <= rr2;          // кромка желоба
         const inA = da <= r2, inB = db <= r2;              // полоса отбора (шире)
         const len2 = (B[0] - A[0]) ** 2 + (B[1] - A[1]) ** 2 + (B[2] - A[2]) ** 2;
@@ -1247,9 +1414,14 @@ export function initSculpt(opts) {
         }
         /* 2) ребро целиком в полосе (внутри кромки или в пояске вокруг неё) —
               делим, пока оно длиннее шага: и дно, и поясок становятся мелкими */
-        if (!inA || !inB) return;
         if (len2 <= s2) return;
+        /* конец снаружи, но ребро пересекает полосу — режем середину, пока
+           ребро не станет короче шага (иначе на крупной сетке полоса не
+           наполняется и борозда не делается вовсе) */
         const p = lerp3(A, B, 0.5);
+        if (!inA || !inB) {
+          if (distToPath(pts, p) > r2) return;
+        }
         if (clashC(p)) return;
         takeC(p); cuts.set(k, p);
       };
@@ -1334,6 +1506,125 @@ export function initSculpt(opts) {
   }
 
 
+  /* ---------- сгущение под кистью (dyntopo «по-простому») ----------
+     Узкое место всех кистей: кисть меньше грани двигает одну точку и получается
+     «шип» вместо купола. Поэтому перед правкой пятно кисти сгущается делением
+     самых ДЛИННЫХ рёбер треугольника (бисекция Ривары): режем не короткое ребро,
+     пока рядом длинное, иначе рядом навсегда остаются тонкие треугольники.
+     Позиции и индексы вставляются пакетом, как в полосе борозды. */
+  function refineSphere(c, R, target, budget = 4000, inRegion = null) {
+    const R2 = R * R, s2 = target * target;
+    const distC = (p) => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]);
+    const pt = (i) => [src[i * 3], src[i * 3 + 1], src[i * 3 + 2]];
+    const len2 = (A, B) => (B[0] - A[0]) ** 2 + (B[1] - A[1]) ** 2 + (B[2] - A[2]) ** 2;
+    let total = 0;
+    for (let pass = 0; pass < 8 && total < budget; pass++) {
+      const cuts = new Map();
+      /* ключ ребра — по КАНОНИЧЕСКИМ узлам: в 3MF/GLB вершины на швах
+         размножены, и одно и то же ребро иначе выглядит как два разных —
+         сетка рвётся трещиной (T-стык) и грани «выворачиваются». */
+      const keyOf = (a, b) => { const ca = canon[a], cb = canon[b]; return ca < cb ? ca * 1e6 + cb : cb * 1e6 + ca; };
+      const cellC = 0.25 * Math.max(1, target / 1);
+      const cGrid = new Map();
+      const cKey = (p) => `${Math.round(p[0] / cellC)}|${Math.round(p[1] / cellC)}|${Math.round(p[2] / cellC)}`;
+      const clashC = (p) => {
+        const cx = Math.round(p[0] / cellC), cy = Math.round(p[1] / cellC), cz = Math.round(p[2] / cellC);
+        for (let d = -1; d <= 1; d++) for (let e = -1; e <= 1; e++) for (let f2 = -1; f2 <= 1; f2++) {
+          const e2 = cGrid.get(`${cx + d}|${cy + e}|${cz + f2}`);
+          if (!e2) continue;
+          for (const q of e2) if (Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < target * 0.35) return true;
+        }
+        return false;
+      };
+      const takeC = (p) => { const k = cKey(p); const e = cGrid.get(k); if (e) e.push(p); else cGrid.set(k, [p]); };
+      const regCut = new Set();
+      const mark = (ia, ib) => {
+        const k = keyOf(ia, ib);
+        if (cuts.has(k)) return;
+        const A = pt(ia), B = pt(ib);
+        /* ребро берём, если оно задевает пятно кисти */
+        const dA = distC(A), dB = distC(B);
+        if (dA > R && dB > R) return;
+        if (len2(A, B) <= s2) return;                 // уже мелко
+        if (dead[canon[ia]] || dead[canon[ib]]) return; // ластик уже пометил
+        const p = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2, (A[2] + B[2]) / 2];
+        if (clashC(p)) return;
+        takeC(p); cuts.set(k, p);
+        /* узел попадёт в закраску, только если оба конца ребра были в ней */
+        if (inRegion && inRegion(ia, ib)) regCut.add(k);
+      };
+      const nf0 = liveIndex.length / 3;
+      for (let f = 0; f < nf0; f++) {
+        const b3 = f * 3;
+        const i0 = liveIndex[b3], i1 = liveIndex[b3 + 1], i2 = liveIndex[b3 + 2];
+        const P0 = pt(i0), P1 = pt(i1), P2 = pt(i2);
+        /* грань не задевает пятно — пропускаем */
+        const dmin = Math.min(distC(P0), distC(P1), distC(P2));
+        if (dmin > R + Math.sqrt(Math.max(len2(P0, P1), len2(P1, P2), len2(P2, P0)))) continue;
+        /* режем САМОЕ ДЛИННОЕ ребро грани (правило Ривары) */
+        const e01 = len2(P0, P1), e12 = len2(P1, P2), e20 = len2(P2, P0);
+        if (e01 >= e12 && e01 >= e20) mark(i0, i1);
+        else if (e12 >= e20) mark(i1, i2);
+        else mark(i2, i0);
+      }
+      if (!cuts.size) break;
+      const keys = [...cuts.keys()];
+      if (keys.length > budget - total) break;
+      const mid = new Map();
+      const out = [];
+      for (const k of keys) { mid.set(k, count + out.length); out.push(cuts.get(k)); }
+      const kNew = out.length;
+      const newSrc = new Float32Array((count + kNew) * 3);
+      newSrc.set(src);
+      const newCol = new Float32Array((count + kNew) * 3).fill(1);
+      newCol.set(col);
+      const node0 = vk;
+      resizeNodeArrays(vk + kNew);
+      const nc2 = new Int32Array(count + kNew); nc2.set(canon);
+      const nr2 = new Int32Array(vk + kNew); nr2.set(topo.rep);
+      for (let i = 0; i < kNew; i++) {
+        const file = count + i, node = node0 + i;
+        newSrc[file * 3] = out[i][0]; newSrc[file * 3 + 1] = out[i][1]; newSrc[file * 3 + 2] = out[i][2];
+        nc2[file] = node; nr2[node] = file;
+        pos[node * 3] = pos0[node * 3] = out[i][0];
+        pos[node * 3 + 1] = pos0[node * 3 + 1] = out[i][1];
+        pos[node * 3 + 2] = pos0[node * 3 + 2] = out[i][2];
+        added[node] = 1;
+        if (inRegion && regCut.has(keys[i])) { reg[node] = 1; regionN++; }
+      }
+      count += kNew; vk += kNew;
+      col = newCol;
+      geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      const ni = new Int32Array(liveIndex.length + 3 * kNew * 2);
+      let w = 0;
+      const push = (a, b, c2) => { ni[w++] = a; ni[w++] = b; ni[w++] = c2; };
+      for (let f = 0; f < nf0; f++) {
+        const b3 = f * 3;
+        const i0 = liveIndex[b3], i1 = liveIndex[b3 + 1], i2 = liveIndex[b3 + 2];
+        const m01 = mid.get(keyOf(i0, i1)), m12 = mid.get(keyOf(i1, i2)), m20 = mid.get(keyOf(i2, i0));
+        const n = (m01 !== undefined ? 1 : 0) + (m12 !== undefined ? 1 : 0) + (m20 !== undefined ? 1 : 0);
+        if (n === 0) { push(i0, i1, i2); continue; }
+        if (n === 3) { push(i0, m01, m20); push(i1, m12, m01); push(i2, m20, m12); push(m01, m12, m20); continue; }
+        if (n === 1) {
+          if (m01 !== undefined) { push(i0, m01, i2); push(m01, i1, i2); }
+          else if (m12 !== undefined) { push(i1, m12, i0); push(m12, i2, i0); }
+          else { push(i2, m20, i1); push(m20, i0, i1); }
+          continue;
+        }
+        if (m01 !== undefined && m12 !== undefined) { push(i1, m12, m01); push(i0, m01, m12); push(i0, m12, i2); }
+        else if (m12 !== undefined && m20 !== undefined) { push(i2, m20, m12); push(i1, m12, m20); push(i1, m20, i0); }
+        else { push(i0, m01, m20); push(i2, m20, m01); push(i2, m01, i1); }
+      }
+      total += kNew;
+      topo.canon = nc2; topo.rep = nr2; topo.vk = vk; topo.count = count; topo.pos0 = pos0;
+      canon = nc2;
+      applySrc(newSrc);
+      setIndex(ni.subarray(0, w));
+      topoDirty = true; nrm = null;
+    }
+    return total;
+  }
+
   /* Сама борозда: путь по коже a→b → новые точки в полосе → вдавливание
      профилем «капсула вдоль пути». Ширина = ползунок «Ширина», глубина =
      «Глубина». Кузов вне полосы не двигается вовсе. */
@@ -1378,7 +1669,7 @@ export function initSculpt(opts) {
     /* Глубина в половину цилиндра: d = hw даёт ровно половину окружности.
        Если ползунок больше радиуса — берём радиус, иначе срез «съест» бока. */
     const depth = Math.min(depthD(), hw);
-    const pre = globalThis.__groovePre ? Float32Array.from(pos) : null;
+    const pre = Float32Array.from(pos);
     let moved = 0, maxd = 0, skipped = 0;
     const bx0 = Math.min(...path.map(q => q[0])) - 2, bx1 = Math.max(...path.map(q => q[0])) + 2;
     const by0 = Math.min(...path.map(q => q[1])) - 2, by1 = Math.max(...path.map(q => q[1])) + 2;
@@ -1387,11 +1678,15 @@ export function initSculpt(opts) {
       const o = v * 3;
       const px = pos[o], py = pos[o + 1], pz = pos[o + 2];
       if (px < bx0 || px > bx1 || py < by0 || py > by1 || pz < bz0 || pz > bz1) continue;
-      if (!fine[v]) continue;
       const pr = pathProj(path, [px, py, pz]);
       if (pr.beyond !== 0) continue;        // торцы желоба плоские: за торцом не режем
       const d2 = pr.lat * pr.lat;
       if (pr.lat > hw) continue;
+      /* Кто вдавливается: глубоко внутри полосы — всегда (там сгущение уже
+         довело сетку), у самой кромки — только мелкие грани. Раньше требовали
+         «мелких» ВЕЗДЕ, а грань на кромке всегда имеет ребро наружу — и на
+         грубой сетке не вдавливалось ни одного узла (глубина 0). */
+      if (!fine[v] && pr.lat > hw * 0.94) continue;
       /* Профиль — ПОЛОВИНА ЦИЛИНДРА: сечение канавки это полукруг радиуса hw,
          вдавленный на глубину depth (depth = hw — ровно половина цилиндра).
          У кромки глубина плавно уходит в ноль, край получается чистым. */
@@ -1419,6 +1714,10 @@ export function initSculpt(opts) {
       pos[o + 2] += ez * s;
       moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
     }
+    /* 2b) страховка от складок: если грань вывернулась или сжалась в иголку —
+       подтягиваем её узлы назад (на грубой сетке это единственное, что мешает
+       «сложить» панель вокруг желоба) */
+    if (moved) clampFlips(pos, pre, topo.tris, 0.05, 6, 0.25);
     /* 3) разгладить поясок вокруг желоба: мелкие грани на неровной панели дают
        «рябь» в затенении. Двигаем только узлы у кромки (дна не касаемся) и только
        в касательной плоскости — глубина и форма желоба не меняются. */
@@ -1901,7 +2200,10 @@ export function initSculpt(opts) {
   /* ---------- зашивка дырки ---------- */
   function applyErase(n) {
     if (!n) return;
-    const res = deleteAndFill(topo, liveIndex, pos, dead);
+    /* кромка, которая была ДО ластика: её нельзя зашивать (край открытой части) */
+    ensureTopo();
+    const preBoundary = boundaryEdgeKeys(topo, liveIndex);
+    const res = deleteAndFill(topo, liveIndex, pos, dead, null, preBoundary);
     setIndex(res.index);
     clearDots();
     let regNow = 0, delNow = 0;
@@ -1945,10 +2247,37 @@ export function initSculpt(opts) {
     return m.moved;
   }
 
+  /** Центр и радиус закрашенной области. */
+  function regionBall() {
+    let cx = 0, cy = 0, cz = 0, n = 0;
+    for (let v = 0; v < vk; v++) if (reg[v]) { cx += pos[v * 3]; cy += pos[v * 3 + 1]; cz += pos[v * 3 + 2]; n++; }
+    if (!n) return null;
+    cx /= n; cy /= n; cz /= n;
+    let R = 0;
+    for (let v = 0; v < vk; v++) {
+      if (!reg[v]) continue;
+      const d = Math.hypot(pos[v * 3] - cx, pos[v * 3 + 1] - cy, pos[v * 3 + 2] - cz);
+      if (d > R) R = d;
+    }
+    return { c: [cx, cy, cz], R, n };
+  }
+  /** Сгустить закрашенную область перед действием: иначе «Выдавить» на грубой
+      сетке поднимает 3 узла — получается шип, а не плоскость/купол. */
+  function refineRegion(extra = 0) {
+    const rb = regionBall();
+    if (!rb) return 0;
+    const r = rb.R + extra;
+    const target = Math.max(r / 4, detailFor(r) * 0.6, 0.1 * U);
+    const inRegion = (ia, ib) => reg[canon[ia]] === 1 && reg[canon[ib]] === 1;
+    const n = refineSphere(rb.c, r * 1.15, target, 4000, inRegion);
+    if (n) { ensureTopo(); regionFront = null; nrm = null; }
+    return n;
+  }
   function smoothOnce() {
     if (!needRegion()) return;
     const steps = Math.max(4, Math.round(amount / 100 * MAXSTEPS));
     pushHist();
+    refineRegion();
     const before = sym ? Float32Array.from(pos) : null;
     const before0 = Float32Array.from(pos);
     free = freeMask(topo, reg);
@@ -1960,6 +2289,7 @@ export function initSculpt(opts) {
       const o = v * 3;
       for (let c = 0; c < 3; c++) p[o + c] = pos[o + c] + (p[o + c] - pos[o + c]) * w[v];
     }
+    clampFlips(p, before0, topo.tris);
     pos.set(p);
     const mirrored = symAfter(before);
     nrm = null;
@@ -1981,9 +2311,12 @@ export function initSculpt(opts) {
   function flattenOnce() {
     if (!needRegion()) return;
     pushHist();
+    refineRegion();
     const before = sym ? Float32Array.from(pos) : null;
     const soft = Math.max(1, Math.min(3, Math.round(Math.sqrt(regionN) / 3)));
+    const preF = Float32Array.from(pos);
     const res = flattenRegion(topo, pos, frontMaskedRegion(), liveIndex, 1, soft);
+    clampFlips(pos, preF, topo.tris, 0.05, 6, 0.15);
     symAfter(before);
     nrm = null;
     flush();
@@ -1997,9 +2330,12 @@ export function initSculpt(opts) {
   function sharpenOnce() {
     if (!needRegion()) return;
     pushHist();
+    refineRegion();
     const before = sym ? Float32Array.from(pos) : null;
     const soft = Math.max(1, Math.min(3, Math.round(Math.sqrt(regionN) / 3)));
+    const pre = Float32Array.from(pos);
     const res = sharpenRegion(topo, pos, frontMaskedRegion(), liveIndex, 0.5, 3, soft);
+    clampFlips(pos, pre, topo.tris);
     symAfter(before);
     nrm = null;
     flush();
@@ -2009,9 +2345,12 @@ export function initSculpt(opts) {
   function extrude(sign) {
     if (!needRegion()) return;
     pushHist();
+    refineRegion();
     const before = sym ? Float32Array.from(pos) : null;
     const soft = Math.max(1, Math.min(4, Math.round(Math.sqrt(regionN) / 3)));
+    const pre = Float32Array.from(pos);
     const res = offsetRegion(topo, pos, frontMaskedRegion(), sign * depthD(), getNormals(), soft);
+    clampFlips(pos, pre, topo.tris);
     const mirrored = symAfter(before);
     nrm = null;
     flush();
@@ -2245,6 +2584,10 @@ export function initSculpt(opts) {
       const c0 = hitPoint(e.clientX, e.clientY);
       if (c0) computeFront(c0);
       makeBlock();
+      const r0 = brushR();
+      if (c0) refineSphere(c0, r0 * 1.25, detailFor(r0), 3000);
+      penBase = Float32Array.from(pos);       // отсчёт — уже по сгущённой сетке
+      ensureTopo(); nrm = null;
       penStamp(e.clientX, e.clientY, invert ? -1 : 1);
       flush();
     } else if (tool === 'groove') {
