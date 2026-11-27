@@ -4622,30 +4622,38 @@ export function initSculpt(opts) {
     if ((z && e.shiftKey) || y) { e.preventDefault(); redoOnce(); return; }
   });
 
-  /* выгрузка */
+  /* выгрузка: либо файл на скачивание, либо — в студии — версия на сервере */
   function save(kind) {
     const cmp = compactMesh(src, liveIndex);
+    let bytes, name;
     if (kind === 'stl') {
-      const bytes = meshToSTL(cmp.positions, cmp.index, 'кузов');
-      const name = 'Tayron_body.stl';
-      const res = downloadBytes(bytes, name, 'model/stl');
-      if (info) {
-        info.innerHTML = `готово: <a href="${res.url}" download="${name}" style="color:var(--acc)">` +
-          `скачать ${name}</a> · ${(bytes.length / 1048576).toFixed(1)} МБ` +
-          (cmp.dropped ? ` · ${cmp.dropped} вершин без граней выкинуто` : '');
-      }
+      bytes = meshToSTL(cmp.positions, cmp.index, 'кузов');
+      name = 'Tayron_body.stl';
+    } else {
+      bytes = meshTo3mf(cmp.positions, cmp.index, {
+        name: 'Кузов',
+        meta: 'VW Tayron: кузов после правки в браузере (печать 17 %)'
+      });
+      name = 'Tayron_body_smooth.3mf';
+    }
+    const tail = cmp.dropped ? ` · ${cmp.dropped} вершин без граней выкинуто` : '';
+    if (typeof opts.saveBytes === 'function') {
+      /* студия (studio.py): сохраняем версию в проект, ничего не качаем */
+      if (info) info.textContent = `сохраняю ${name} …`;
+      Promise.resolve(opts.saveBytes(kind, bytes, name, cmp))
+        .then((text) => {
+          dirty = false;
+          if (info) info.textContent = (text || `сохранено: ${name}`) + tail;
+        })
+        .catch((err) => {
+          if (info) info.innerHTML = `<b>не сохранилось</b>: ${String(err && err.message || err)}`;
+        });
       return;
     }
-    const bytes = meshTo3mf(cmp.positions, cmp.index, {
-      name: 'Кузов',
-      meta: 'VW Tayron: кузов после правки в браузере (печать 17 %)'
-    });
-    const name = 'Tayron_body_smooth.3mf';
-    const res = downloadBytes(bytes, name);
+    const res = kind === 'stl' ? downloadBytes(bytes, name, 'model/stl') : downloadBytes(bytes, name);
     if (info) {
       info.innerHTML = `готово: <a href="${res.url}" download="${name}" style="color:var(--acc)">` +
-        `скачать ${name}</a> · ${(bytes.length / 1048576).toFixed(1)} МБ` +
-        (cmp.dropped ? ` · ${cmp.dropped} вершин без граней выкинуто` : '') +
+        `скачать ${name}</a> · ${(bytes.length / 1048576).toFixed(1)} МБ${tail}` +
         '. Если браузер не начал скачивание сам — нажмите ссылку.';
     }
   }
@@ -4717,6 +4725,14 @@ export function initSculpt(opts) {
     },
     saveProject,
     loadProject,
+    /** текущая сетка как есть — для сервера, миниатюр и своих выгрузок */
+    get mesh() {
+      const cmp = compactMesh(src, liveIndex);
+      return { positions: cmp.positions, index: cmp.index, dropped: cmp.dropped,
+        faces: cmp.index.length / 3, verts: cmp.positions.length / 3 };
+    },
+    /** сохранить/скачать через свой обработчик (студия пишет файл на диск) */
+    setSaveHandler(fn) { opts.saveBytes = fn; },
     get dirty() { return dirty; },
     projectData,
     get projectJSON() { return JSON.stringify(projectData()); },
