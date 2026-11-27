@@ -699,6 +699,8 @@ export function initSculpt(opts) {
     hist.push(snap || snapshot());
     if (hist.length > 15) hist.shift();
     redo.length = 0;
+    if (typeof syncHistButtons === 'function') syncHistButtons();
+    if (typeof syncDirtyMark === 'function') syncDirtyMark();
   }
   function setIndex(ix) {
     liveIndex = ix;
@@ -3971,7 +3973,45 @@ export function initSculpt(opts) {
     tag(btnLite, tool === 'lite', '■ Готово (упрощение)', '− ⊽ Упростить');
   }
 
+  /* ---------- у каждого инструмента свои настройки ----------
+     Кисть, глубина и степень были общими: выставив ширину борозды 4 мм,
+     вы возвращались к «Участку» с кистью 4 мм, а рамка брала ту же четвёрку
+     как радиус поиска пары. Теперь каждый инструмент помнит своё и возвращает
+     ползунки на место при переключении. */
+  const TOOL_CFG = Object.create(null);
+  /* «Кисть» у лепки, ластика, пера, фигуры и точки — одна и та же величина:
+     настроил один раз — остальные видят её же. А «Ширина» борозды, «Радиус»
+     рамки и «Степень» упрощения — свои: это разные числа в одном ползунке. */
+  const BRUSH_TOOLS = ['select', 'erase', 'pen', 'shape', 'point'];
+  const cfgKey = (t) => (BRUSH_TOOLS.indexOf(t) >= 0 ? 'brush' : t);
+  let fallNow = 'smooth';
+  /* у нового инструмента настроек ещё нет — берём текущие ползунки: так
+     «Упростить», впервые включённая с кистью 6 мм, начнёт с тех же 6 мм,
+     а дальше уже помнит своё */
+
+  const readCfg = () => ({ brush: brushMM, depth: depthMM, amount, fall: fallNow });
+  function writeCfg(c) {
+    if (!c) return;
+    brushMM = c.brush; depthMM = c.depth; amount = c.amount; fallNow = c.fall;
+    const setVal = (id, v, text) => {
+      const el = $(id); if (el) el.value = v;
+      const lab = $(id + 'v'); if (lab) lab.textContent = text;
+    };
+    setVal('sc-brush', String(brushMM), brushMM.toFixed(1) + ' мм');
+    setVal('sc-depth', String(depthMM), depthMM.toFixed(2) + ' мм');
+    setVal('sc-amt', String(amount), Math.round(amount) + '%');
+    const f = $('sc-fall'); if (f) f.value = fallNow;
+    setFalloff(fallNow);
+  }
+  /** настроек какого инструмента не хватает — заводим из текущих ползунков */
+  function toolCfg(t) {
+    const k = cfgKey(t);
+    if (!TOOL_CFG[k]) TOOL_CFG[k] = readCfg();
+    return TOOL_CFG[k];
+  }
+
   function setTool(t) {
+    if (t !== tool && tool) TOOL_CFG[cfgKey(tool)] = readCfg();   // уходящий инструмент помнит своё
     if (t !== tool) hideCursor();
     const wasSelect = tool === 'select' && regionN > 0;
     tool = (tool === t) ? null : t;
@@ -3984,6 +4024,7 @@ export function initSculpt(opts) {
     else showBox();
     block = null; allow = null;   // маска лицевых граней считается заново на каждом штрихе
     if (tool !== 'point') { ptSnap = null; lastPt = null; }
+    if (tool) writeCfg(toolCfg(tool));      // свои ползунки у каждого инструмента
     syncRows();
     clearDots();
     syncControls();
@@ -4280,7 +4321,7 @@ export function initSculpt(opts) {
     syncInfo();
   });
   const fallEl = $('sc-fall');
-  if (fallEl) fallEl.addEventListener('change', () => { setFalloff(fallEl.value); syncInfo(); });
+  if (fallEl) fallEl.addEventListener('change', () => { fallNow = setFalloff(fallEl.value); syncInfo(); });
   const amtEl = $('sc-amt');
   if (amtEl) amtEl.addEventListener('input', () => {
     amount = +amtEl.value;
@@ -4288,13 +4329,22 @@ export function initSculpt(opts) {
     syncInfo();
   });
   const on = (id, fn, ev = 'click') => { const e = $(id); if (e) e.addEventListener(ev, fn); };
-  on('sc-go', smoothOnce);
-  on('sc-flat', flattenOnce);
-  on('sc-sharp', sharpenOnce);
-  on('sc-out', () => extrude(1));
-  on('sc-in', () => extrude(-1));
-  on('sc-relax', relaxOnce);
-  on('sc-pinch', pinchOnce);
+  /* последнее действие над участком — Enter или пробел повторяют его,
+     не переставляя курсор в панель */
+  let lastAct = null;
+  const act = (label, fn) => () => { lastAct = { label, fn }; fn(); };
+  function repeatAction() {
+    if (!lastAct) { syncInfo('повторять нечего — сначала «Сгладить», «Выдавить» и т. п.'); return false; }
+    lastAct.fn();
+    return true;
+  }
+  on('sc-go', act('Сгладить', smoothOnce));
+  on('sc-flat', act('Выровнять', flattenOnce));
+  on('sc-sharp', act('Обострить', sharpenOnce));
+  on('sc-out', act('Выдавить', () => extrude(1)));
+  on('sc-in', act('Вдавить', () => extrude(-1)));
+  on('sc-relax', act('Расслабить', relaxOnce));
+  on('sc-pinch', act('Защемить', pinchOnce));
   on('sc-grow', () => growOnce(1));
   on('sc-shrink', () => growOnce(-1));
   on('sc-invert', invertRegion);
@@ -4330,18 +4380,39 @@ export function initSculpt(opts) {
   });
 
   /* отмена / возврат / сброс */
-  on('sc-undo', () => {
+  function syncHistButtons() {
+    const u = $('sc-undo'), r = $('sc-redo');
+    if (u) { u.disabled = hist.length === 0; u.classList.toggle('off', hist.length === 0); }
+    if (r) { r.disabled = redo.length === 0; r.classList.toggle('off', redo.length === 0); }
+  }
+  /** точка на «Сохранить», пока правка не сохранена в проект */
+  function syncDirtyMark() {
+    const b = $('sc-proj-save');
+    if (!b) return;
+    b.textContent = dirty ? '💾 Сохранить ●' : '💾 Сохранить';
+    b.classList.toggle('dirty', dirty);
+    b.title = dirty ? 'Есть несохранённые правки (Ctrl+S) — сохранить в .json'
+      : 'Сохранить правку в .json — чтобы продолжить позже';
+  }
+
+  function undoOnce() {
     const h = hist.pop();
-    if (!h) { syncInfo('отменять нечего'); return; }
+    if (!h) { syncInfo('отменять нечего'); return false; }
     redo.push(snapshot());
     restore(h);
-  });
-  on('sc-redo', () => {
+    syncHistButtons();
+    return true;
+  }
+  function redoOnce() {
     const r = redo.pop();
-    if (!r) { syncInfo('возвращать нечего'); return; }
+    if (!r) { syncInfo('возвращать нечего'); return false; }
     hist.push(snapshot());
     restore(r);
-  });
+    syncHistButtons();
+    return true;
+  }
+  on('sc-undo', undoOnce);
+  on('sc-redo', redoOnce);
   on('sc-deselect', deselect);
   on('sc-mirror', mirrorCopy);
   on('sc-boxflip', () => { if (!flipBox()) return; });
@@ -4376,7 +4447,7 @@ export function initSculpt(opts) {
     added.fill(0); addedTotal = 0; front.fill(1); block = null; allow = null;
     setIndex(origIndex.slice());
     nrm = null;
-    dirty = false;
+    dirty = false; syncDirtyMark(); syncHistButtons();
     paintMarks(); updateAddedDots(); flush(); syncInfo();
   });
   /* ---------- сохранение и загрузка правки ----------
@@ -4432,7 +4503,7 @@ export function initSculpt(opts) {
     const json = JSON.stringify(data);
     const name = 'Tayron_body_edit.json';
     const res = downloadBytes(new TextEncoder().encode(json), name, 'application/json');
-    dirty = false;
+    dirty = false; syncDirtyMark(); syncHistButtons();
     if (info) {
       info.innerHTML = `правка сохранена: <a href="${res.url}" download="${name}" style="color:var(--acc)">` +
         `скачать ${name}</a> · ${(json.length / 1024).toFixed(1)} КБ · сдвинуто вершин ` +
@@ -4483,7 +4554,7 @@ export function initSculpt(opts) {
     block = null; allow = null; regionFront = null; nrm = null;
     free = freeMask(topo, reg);
     clearDots(); paintMarks(); updateAddedDots(); flush();
-    dirty = false;
+    dirty = false; syncDirtyMark(); syncHistButtons();
     if (d.vk && d.vk !== vk) {
       syncInfo(`правка загружена, но узлов стало ${vk} вместо ${d.vk} — маски пересчитаны`);
     } else {
@@ -4498,21 +4569,39 @@ export function initSculpt(opts) {
     '6': 'measure', '7': 'rect', '8': 'groove', '9': 'rope' };
   function stepBrush(d) {
     brushMM = Math.min(20, Math.max(0.1, Math.round((brushMM + d) * 10) / 10));
+    /* клавиша работает и в режиме просмотра: размер запоминаем той группе,
+       которую потом включат первой */
+    const k = tool ? cfgKey(tool) : 'brush';
+    TOOL_CFG[k] = { ...(TOOL_CFG[k] || readCfg()), brush: brushMM };
     if (brushEl) brushEl.value = String(brushMM);
     const l = $('sc-brushv');
     if (l) l.textContent = brushMM.toFixed(1) + ' мм';
     syncInfo();
   }
+  /* e.key зависит от раскладки: на русской Ctrl+Z приходит как «я», а [ и ] —
+     как «х» и «ъ». Поэтому физические клавиши ловим по e.code, а e.key оставляем
+     запасным путём (старые браузеры, экранные клавиатуры). */
+  const codeOrKey = (e, code, ...keys) => (e.code === code) || keys.indexOf(e.key) >= 0;
   globalThis.addEventListener && globalThis.addEventListener('keydown', (e) => {
     const tn = e.target && e.target.tagName;
     if (tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT') return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;       // Ctrl+Z — ниже
     if (TOOL_KEYS[e.key]) { setTool(TOOL_KEYS[e.key]); e.preventDefault(); return; }
     if (e.key === 'Escape' && tool) { setTool(tool); e.preventDefault(); return; }
-    if (e.key === '[') { stepBrush(-0.5); e.preventDefault(); return; }
-    if (e.key === ']') { stepBrush(0.5); e.preventDefault(); return; }
-    if (e.key === '0') { deselect(); e.preventDefault(); }
-    if (e.key === '-' || e.key === '_') { setTool('lite'); e.preventDefault(); return; }
+    if (codeOrKey(e, 'BracketLeft', '[')) { stepBrush(-0.5); e.preventDefault(); return; }
+    if (codeOrKey(e, 'BracketRight', ']')) { stepBrush(0.5); e.preventDefault(); return; }
+    if (e.key === '0' || e.code === 'Digit0') { deselect(); e.preventDefault(); return; }
+    if (codeOrKey(e, 'Minus', '-', '_')) { setTool('lite'); e.preventDefault(); return; }
+    if (e.key === 'Enter' || e.key === 'NumpadEnter' || e.key === ' ' || e.code === 'Space') {
+      /* на кнопке пробел — это её нажатие; повторяем только с холста/панели */
+      const el = e.target;
+      const onBtn = el && (el.tagName === 'BUTTON' || el.tagName === 'A' ||
+        (typeof el.closest === 'function' && el.closest('button,a')));
+      if (onBtn) return;
+      repeatAction();
+      e.preventDefault();
+      return;
+    }
   });
   /* закрывать вкладку с несохранённой правкой без предупреждения нельзя */
   globalThis.addEventListener && globalThis.addEventListener('beforeunload', (e) => {
@@ -4523,10 +4612,14 @@ export function initSculpt(opts) {
   });
   globalThis.addEventListener && globalThis.addEventListener('keydown', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
-    const k = (e.key || '').toLowerCase();
-    if (k === 's') { e.preventDefault(); saveProject(); return; }   // Ctrl+S — сохранить правку
-    if (k === 'z' && !e.shiftKey) { e.preventDefault(); const h = hist.pop(); if (h) { redo.push(snapshot()); restore(h); } }
-    else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); const r = redo.pop(); if (r) { hist.push(snapshot()); restore(r); } }
+    const tn = e.target && e.target.tagName;
+    if (tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT') return;
+    const z = codeOrKey(e, 'KeyZ', 'z', 'Z', 'я', 'Я');
+    const y = codeOrKey(e, 'KeyY', 'y', 'Y', 'н', 'Н');
+    const sKey = codeOrKey(e, 'KeyS', 's', 'S', 'ы', 'Ы');
+    if (sKey) { e.preventDefault(); saveProject(); return; }        // Ctrl+S — сохранить правку
+    if (z && !e.shiftKey) { e.preventDefault(); undoOnce(); return; }
+    if ((z && e.shiftKey) || y) { e.preventDefault(); redoOnce(); return; }
   });
 
   /* выгрузка */
@@ -4562,6 +4655,8 @@ export function initSculpt(opts) {
   syncInfo();
 
   syncToolButtons();   // подписи кнопок не ждут первого клика
+  syncHistButtons();
+  syncDirtyMark();
   syncInfo();
 
   return {

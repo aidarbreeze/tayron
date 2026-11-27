@@ -45,6 +45,8 @@
 
   .presets{display:grid;grid-template-columns:1fr 1fr;gap:6px}
   .presets.three{grid-template-columns:1fr 1fr 1fr}
+  .btn:disabled{opacity:.4;cursor:default;background:rgba(255,255,255,.02)}
+  .btn.dirty{border-color:rgba(255,201,77,.65);color:#ffdc8f}
   .btn{border:1px solid var(--line);background:rgba(255,255,255,.045);color:var(--txt);
     border-radius:9px;padding:7px 8px;font-size:11.5px;cursor:pointer;transition:.14s;text-align:center;
     font-family:inherit;line-height:1.25}
@@ -151,6 +153,10 @@
     <span><kbd>ПКМ</kbd> вращать</span>
     <span><kbd>колесо</kbd> масштаб</span>
     <span><kbd>1</kbd>…<kbd>9</kbd>, <kbd>−</kbd> инструменты</span>
+    <span><kbd>[</kbd> <kbd>]</kbd> кисть</span>
+    <span><kbd>Enter</kbd> повторить действие</span>
+    <span><kbd>Ctrl</kbd>+<kbd>Z</kbd> отмена</span>
+    <span><kbd>Ctrl</kbd>+<kbd>S</kbd> сохранить правку</span>
     <span><kbd>Esc</kbd> выход</span>
   </div>
 </div>
@@ -174,7 +180,8 @@
     колесом — приблизить); кольцо под курсором показывает размер кисти. Дальше — кнопки
     ниже: <b>«Сгладить»</b> (шаг за нажатие), <b>«Выровнять»</b> (в плоскость),
     <b>«Обострить»</b>, <b>«Выдавить» / «Вдавить»</b> на глубину.
-    <b>[</b> и <b>]</b> — размер кисти, <b>0</b> — снять выделение, <b>Esc</b> — выйти.
+    <b>[</b> и <b>]</b> — размер кисти, <b>0</b> — снять выделение, <b>Esc</b> — выйти,
+    <b>Enter</b> или <b>пробел</b> — повторить последнее действие.
     <b>7</b> — рамка: обведите видимую часть <b>одной</b> стороны кузова, затем
     <b>«⇄ Зеркально»</b> — эта часть встанет зеркалом на другую сторону.
     <b>8</b> — борозда: протяните линию по кузову, вдоль неё встанет ровный желоб
@@ -282,9 +289,9 @@
 
   <h2>Правка и печать</h2>
   <div class="presets three">
-    <button class="btn" id="sc-undo">↶ Отменить</button>
-    <button class="btn" id="sc-redo">↷ Вернуть</button>
-    <button class="btn" id="sc-clear">⟲ Сбросить</button>
+    <button class="btn" id="sc-undo" title="Отменить последнюю правку (Ctrl+Z)">↶ Отменить</button>
+    <button class="btn" id="sc-redo" title="Вернуть отменённое (Ctrl+Shift+Z или Ctrl+Y)">↷ Вернуть</button>
+    <button class="btn" id="sc-clear" title="Вернуть исходный кузов — отменяется через Ctrl+Z">⟲ Сбросить</button>
   </div>
   <div class="presets" style="margin-top:6px">
     <button class="btn" id="sc-save">⬇ 3MF</button>
