@@ -763,6 +763,9 @@ export function initSculpt(opts) {
   let addedTotal = 0;       // сколько точек добавлено за сеанс
   let ptSnap = null;        // снимок до первой вставки точки за штрих
   let ptMsg = null;         // сообщение инструмента «Точка» (переживает отпускание кнопки)
+  let boxSel = null;        // куб-рамка: {x0,x1,y0,y1,z0,z1} в координатах кузова
+  let boxTo = 1;            // куда пойдёт зеркальная копия: +1 левая (y>0), −1 правая
+  let boxDrag = null;       // текущее перетаскивание куба
 
   const brushR = () => brushMM * U;
   const depthD = () => depthMM * U;
@@ -2845,6 +2848,327 @@ export function initSculpt(opts) {
     const o = v * 3;
     return screenOfPoint(pos[o], pos[o + 1], pos[o + 2], out);
   }
+  /* ---------- куб-рамка: видимый бокс с ручками ----------
+     Рамка теперь превращается в 3D-куб. Его тащат за центральную ручку, тянут
+     за любую из шести граней (размер) и переворачивают кнопкой «⇄ Сторона»:
+     куб переезжает на другую сторону, и зеркальная копия идёт в обратном
+     направлении. Выделение считается по объёму куба, зеркальная копия берёт
+     из него целые грани — так же, как раньше брала их из экранной рамки. */
+  const HANDLE_MM = 1.1;      // ручка: 1.1 мм печати — ~11 px на экране
+  const BOX_MIN_MM = 0.4;     // минимальная сторона куба
+  const BOX_EPS_MM = 0.25;    // зазор от куба до плоскости симметрии
+  const AXIS = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  let boxGroup = null, boxEdge = null, boxGhost = null, boxMove = null;
+  const boxHandles = [];
+  const boxRay = new THREE.Raycaster();
+  const boxNdc = new THREE.Vector2();
+
+  const boxSideIs = (b) => ((b.y0 + b.y1) > 0 ? 1 : -1);
+  function inBox(x, y, z) {
+    const b = boxSel;
+    return !!b && x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1 && z >= b.z0 && z <= b.z1;
+  }
+  function boxCenter() {
+    const b = boxSel;
+    return [(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, (b.z0 + b.z1) / 2];
+  }
+  function boxSize() {
+    const b = boxSel;
+    return [b.x1 - b.x0, b.y1 - b.y0, b.z1 - b.z0];
+  }
+
+  function ensureBox() {
+    if (boxGroup) return boxGroup;
+    if (!THREE.Group || !THREE.BoxGeometry || !THREE.EdgesGeometry) return null;
+    boxGroup = new THREE.Group();
+    boxGroup.name = 'sc-frame-box';
+    boxGroup.frustumCulled = false;
+    const edge = () => new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+      new THREE.LineBasicMaterial({ color: 0xffc94d, depthTest: false, transparent: true, opacity: 1 }));
+    boxEdge = edge(); boxEdge.renderOrder = 40;
+    boxGhost = edge();
+    boxGhost.material.color.setHex(0x38e1c4);
+    boxGhost.material.opacity = 0.55;
+    boxGhost.renderOrder = 39;
+    boxGroup.add(boxEdge, boxGhost);
+    const boxMat = (hex, op) => new THREE.MeshBasicMaterial({
+      color: hex, depthTest: false, depthWrite: false, transparent: true, opacity: op });
+    for (const [axis, sign] of [[0, 1], [0, -1], [1, 1], [1, -1], [2, 1], [2, -1]]) {
+      const h = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), boxMat(0xffc94d, 0.95));
+      h.userData = { boxHandle: 'face', axis, sign };
+      h.renderOrder = 41;
+      boxGroup.add(h);
+      boxHandles.push(h);
+    }
+    boxMove = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), boxMat(0x38e1c4, 0.95));
+    boxMove.userData = { boxHandle: 'move' };
+    boxMove.renderOrder = 42;
+    boxGroup.add(boxMove);
+    boxHandles.push(boxMove);
+    boxGroup.visible = false;
+    mesh.add(boxGroup);                      // в системе координат кузова
+    return boxGroup;
+  }
+
+  /** поставить куб на место и нарисовать ручки; зеркальный «призрак» показывает,
+      куда ляжет копия */
+  function syncBoxView() {
+    if (!boxSel || tool !== 'rect') {
+      if (boxGroup) boxGroup.visible = false;
+      return;
+    }
+    const g = ensureBox();
+    if (!g) return;
+    g.visible = true;
+    const b = boxSel;
+    const [cx, cy, cz] = boxCenter();
+    const [sx, sy, sz] = boxSize();
+    const hs = HANDLE_MM * U;
+    boxEdge.position.set(cx, cy, cz);
+    boxEdge.scale.set(Math.max(sx, 1e-3), Math.max(sy, 1e-3), Math.max(sz, 1e-3));
+    boxGhost.position.set(cx, -cy, cz);
+    boxGhost.scale.copy(boxEdge.scale);
+    boxHandles.forEach((h) => {
+      const ud = h.userData;
+      if (ud.boxHandle === 'move') {
+        h.position.set(cx, cy, cz);
+        h.scale.setScalar(hs * 1.5);
+        return;
+      }
+      h.position.set(
+        cx + (ud.axis === 0 ? ud.sign * sx / 2 : 0),
+        cy + (ud.axis === 1 ? ud.sign * sy / 2 : 0),
+        cz + (ud.axis === 2 ? ud.sign * sz / 2 : 0));
+      h.scale.setScalar(hs);
+    });
+  }
+  function hideBoxView() { if (boxGroup) boxGroup.visible = false; }
+
+  function syncBoxButtons() {
+    const flip = $('sc-boxflip');
+    if (flip) {
+      flip.textContent = boxSel
+        ? (boxTo > 0 ? '⇄ Сторона: на левую' : '⇄ Сторона: на правую')
+        : '⇄ Сторона';
+    }
+    const drop = $('sc-boxdrop');
+    if (drop) drop.classList.toggle('on', false);
+  }
+
+  /** выделение по объёму куба */
+  function applyBoxSelection() {
+    if (!boxSel) { reg.fill(0); regionN = 0; paintMarks(); return 0; }
+    const b = boxSel;
+    reg.fill(0);
+    let n = 0;
+    for (let v = 0; v < vk; v++) {
+      if (dead[v]) continue;
+      const o = v * 3;
+      const x = pos[o], y = pos[o + 1], z = pos[o + 2];
+      if (x < b.x0 || x > b.x1 || y < b.y0 || y > b.y1 || z < b.z0 || z > b.z1) continue;
+      reg[v] = 1; n++;
+    }
+    regionN = n;
+    regFromRect = true;
+    regionFront = null;
+    paintMarks();
+    return n;
+  }
+
+  function boxText() {
+    if (!boxSel) return 'куба нет — растяните рамку по кузову';
+    const [sx, sy, sz] = boxSize();
+    const src = boxSideIs(boxSel) > 0 ? 'левая' : 'правая';
+    const dst = boxTo > 0 ? 'левая' : 'правая';
+    return `куб ${(sx / U).toFixed(1)} × ${(sy / U).toFixed(1)} × ${(sz / U).toFixed(1)} мм · ` +
+      `${regionN} вершин · источник ${src} → копия ${dst}`;
+  }
+
+  /** новый куб по экранной рамке: габарит видимых узлов + вся толщина стороны */
+  function boxFromRect(xa, ya, xb, yb, picked, side) {
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (const v of picked) {
+      const o = v * 3;
+      if (pos[o] < x0) x0 = pos[o];
+      if (pos[o] > x1) x1 = pos[o];
+      if (pos[o + 2] < z0) z0 = pos[o + 2];
+      if (pos[o + 2] > z1) z1 = pos[o + 2];
+    }
+    /* по толщине куб сразу берёт всю сторону: копия должна закрыть участок
+       целиком, а не только то, что видно с одной точки */
+    let y0 = Infinity, y1 = -Infinity;
+    for (let v = 0; v < vk; v++) {
+      if (dead[v]) continue;
+      const o = v * 3;
+      const x = pos[o], y = pos[o + 1], z = pos[o + 2];
+      if ((y > 0 ? 1 : -1) !== side) continue;
+      if (x < x0 || x > x1 || z < z0 || z > z1) continue;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    if (!isFinite(y0)) { y0 = side > 0 ? BOX_EPS_MM * U : -BOX_EPS_MM * U; y1 = y0; }
+    const eps = BOX_EPS_MM * U, minS = BOX_MIN_MM * U;
+    if (side > 0) { y0 = Math.max(y0, eps); y1 = Math.max(y1, y0 + minS); }
+    else { y1 = Math.min(y1, -eps); y0 = Math.min(y0, y1 - minS); }
+    if (x1 - x0 < minS) x1 = x0 + minS;
+    if (z1 - z0 < minS) z1 = z0 + minS;
+    boxSel = { x0, x1, y0, y1, z0, z1 };
+    boxTo = -side;
+    applyBoxSelection();
+    syncBoxView();
+    syncBoxButtons();
+    return boxSel;
+  }
+
+  /* --- перетаскивание: центральная ручка двигает, шесть граней меняют размер --- */
+  const localInv = () => {
+    const m = new THREE.Matrix4().copy(mesh.matrixWorld);
+    return m.invert ? m.invert() : m.getInverse(mesh.matrixWorld);
+  };
+  function localRay(clientX, clientY) {
+    if (!camera || !mesh.matrixWorld) return null;
+    boxNdc.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
+    boxRay.setFromCamera(boxNdc, camera);
+    const inv = localInv();
+    const o = boxRay.ray.origin.clone().applyMatrix4(inv);
+    const tip = boxRay.ray.origin.clone().add(boxRay.ray.direction).applyMatrix4(inv);
+    const d = tip.sub(o);
+    if (d.lengthSq() < 1e-12) return null;
+    return { o, d: d.normalize() };
+  }
+  function localCamDir() {
+    const d = new THREE.Vector3();
+    camera.getWorldDirection(d);
+    const inv = localInv();
+    const o = new THREE.Vector3(0, 0, 0).applyMatrix4(inv);
+    const t = new THREE.Vector3(0, 0, 0).add(d).applyMatrix4(inv);
+    return t.sub(o).normalize();
+  }
+  function rayPlane(lr, p, n) {
+    const dn = lr.d.x * n.x + lr.d.y * n.y + lr.d.z * n.z;
+    if (Math.abs(dn) < 1e-6) return null;
+    const t = ((p[0] - lr.o.x) * n.x + (p[1] - lr.o.y) * n.y + (p[2] - lr.o.z) * n.z) / dn;
+    if (!isFinite(t)) return null;
+    return [lr.o.x + lr.d.x * t, lr.o.y + lr.d.y * t, lr.o.z + lr.d.z * t];
+  }
+  /** ближайшая к лучу точка прямой p + t·a → сам параметр t */
+  function rayAxis(lr, p, a) {
+    const wx = lr.o.x - p[0], wy = lr.o.y - p[1], wz = lr.o.z - p[2];
+    const b = lr.d.x * a[0] + lr.d.y * a[1] + lr.d.z * a[2];
+    const dd = lr.d.x * wx + lr.d.y * wy + lr.d.z * wz;
+    const ee = a[0] * wx + a[1] * wy + a[2] * wz;
+    const den = 1 - b * b;
+    if (Math.abs(den) < 1e-6) return null;
+    return (ee - b * dd) / den;
+  }
+  function boxHit(clientX, clientY) {
+    if (!boxSel || tool !== 'rect' || !boxGroup || !boxGroup.visible) return null;
+    const lr = localRay(clientX, clientY);
+    if (!lr) return null;
+    if (boxGroup.updateMatrixWorld) boxGroup.updateMatrixWorld(true);
+    boxNdc.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
+    boxRay.setFromCamera(boxNdc, camera);
+    const hits = boxRay.intersectObjects(boxHandles, false);
+    return hits.length ? hits[0] : null;
+  }
+  function boxDragStart(h, e, grab) {
+    if (!boxSel) return false;
+    const lr = localRay(e.clientX, e.clientY);
+    if (!lr) return false;
+    const c = grab ? grab.slice() : boxCenter();
+    const b = { ...boxSel };
+    const ud = h ? (h.object.userData || {}) : { boxHandle: 'move' };
+    if (ud.boxHandle === 'move') {
+      const n = localCamDir();
+      const p = rayPlane(lr, c, n);
+      if (!p) return false;
+      boxDrag = { kind: 'move', start: b, p0: p, plane: c, normal: n, side: boxSideIs(b) };
+    } else {
+      const axis = ud.axis | 0, sign = ud.sign | 0;
+      const t0 = rayAxis(lr, c, AXIS[axis]);
+      if (t0 === null) return false;
+      const base = axis === 0 ? (sign > 0 ? b.x1 : b.x0)
+        : axis === 1 ? (sign > 0 ? b.y1 : b.y0)
+          : (sign > 0 ? b.z1 : b.z0);
+      boxDrag = { kind: 'face', axis, sign, start: b, center: c, base, t0, side: boxSideIs(b) };
+    }
+    try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
+    return true;
+  }
+  function boxClampSide(b, side) {
+    const eps = BOX_EPS_MM * U;
+    if (side > 0) {
+      if (b.y0 < eps) { const d = eps - b.y0; b.y0 += d; b.y1 += d; }
+    } else if (b.y1 > -eps) {
+      const d = -eps - b.y1; b.y0 += d; b.y1 += d;
+    }
+    return b;
+  }
+  function boxDragAt(e) {
+    if (!boxDrag) return false;
+    const lr = localRay(e.clientX, e.clientY);
+    if (!lr) return false;
+    const s = boxDrag.start;
+    const minS = BOX_MIN_MM * U;
+    if (boxDrag.kind === 'move') {
+      const p = rayPlane(lr, boxDrag.plane, boxDrag.normal);
+      if (!p) return false;
+      const dx = p[0] - boxDrag.p0[0], dy = p[1] - boxDrag.p0[1], dz = p[2] - boxDrag.p0[2];
+      const b = { x0: s.x0 + dx, x1: s.x1 + dx, y0: s.y0 + dy, y1: s.y1 + dy, z0: s.z0 + dz, z1: s.z1 + dz };
+      boxSel = boxClampSide(b, boxDrag.side);
+    } else {
+      const t = rayAxis(lr, boxDrag.center, AXIS[boxDrag.axis]);
+      if (t === null) return false;
+      const v = boxDrag.base + (t - boxDrag.t0);
+      const b = { ...s };
+      if (boxDrag.axis === 0) {
+        if (boxDrag.sign > 0) b.x1 = Math.max(v, b.x0 + minS); else b.x0 = Math.min(v, b.x1 - minS);
+      } else if (boxDrag.axis === 1) {
+        if (boxDrag.sign > 0) b.y1 = Math.max(v, b.y0 + minS); else b.y0 = Math.min(v, b.y1 - minS);
+        boxClampSide(b, boxDrag.side);
+      } else {
+        if (boxDrag.sign > 0) b.z1 = Math.max(v, b.z0 + minS); else b.z0 = Math.min(v, b.z1 - minS);
+      }
+      boxSel = b;
+    }
+    applyBoxSelection();
+    syncBoxView();
+    syncInfo(boxText());
+    return true;
+  }
+  function boxDragEnd() {
+    if (!boxDrag) return false;
+    boxDrag = null;
+    syncBoxView();
+    syncInfo(boxText());
+    return true;
+  }
+  /** перевернуть куб на другую сторону — копия пойдёт в обратном направлении */
+  function flipBox() {
+    if (!boxSel) { syncInfo('куба нет — растяните рамку по кузову'); return false; }
+    const b = boxSel;
+    boxSel = { x0: b.x0, x1: b.x1, y0: -b.y1, y1: -b.y0, z0: b.z0, z1: b.z1 };
+    boxTo = -boxTo;
+    applyBoxSelection();
+    syncBoxView();
+    syncBoxButtons();
+    syncInfo(boxText());
+    return true;
+  }
+  /** убрать куб, выделение остаётся */
+  function dropBox() {
+    if (!boxSel) { syncInfo('куба уже нет'); return false; }
+    boxSel = null;
+    boxDrag = null;
+    hideBoxView();
+    syncBoxButtons();
+    regFromRect = false;
+    syncInfo(`куб убран, выделение осталось: ${regionN} вершин`);
+    return true;
+  }
+  function showBox() { if (boxSel) { syncBoxView(); syncBoxButtons(); } }
+
   function inRectScreen(x, y, z) {
     if (!rectSel) return true;
     const sc = screenOfPoint(x, y, z, [0, 0]);
@@ -2876,19 +3200,11 @@ export function initSculpt(opts) {
       return 0;
     }
     const side = meanY > 0 ? 1 : -1;
-    reg.fill(0); regionN = 0; regionFront = null;
-    let n = 0;
-    for (const v of picked) {
-      if ((pos[v * 3 + 1] > 0 ? 1 : -1) !== side) continue;
-      reg[v] = 1; n++;
-    }
-    regionN = n;
     rectSel = { x0: xa, y0: ya, x1: xb, y1: yb };
     regFromRect = true;
-    paintMarks();
-    syncInfo(`рамка: ${n} вершин, ${side > 0 ? 'левая' : 'правая'} сторона · ` +
-      `«⇄ Зеркально» скопирует на ${side > 0 ? 'правую' : 'левую'}`);
-    return n;
+    boxFromRect(xa, ya, xb, yb, picked, side);
+    syncInfo(boxText());
+    return regionN;
   }
 
   /** Убрать грани с нулевой площадью и с двойным направленным ребром, дырку
@@ -2963,6 +3279,7 @@ export function initSculpt(opts) {
       if (((pos[o + 1] > 0) ? 1 : -1) !== side) return false;
       if (Math.abs(pos[o + 1]) < 1) return false;          // сама плоскость симметрии
       if (!regFromRect) return !!reg[nd];
+      if (boxSel) return inBox(pos[o], pos[o + 1], pos[o + 2]);
       return inRectScreen(pos[o], pos[o + 1], pos[o + 2]);
     };
     for (let f = 0; f < liveIndex.length; f += 3) {
@@ -3243,6 +3560,7 @@ export function initSculpt(opts) {
     const n = regionN;
     pushHist();                       // выделение можно вернуть через Ctrl+Z
     reg.fill(0); regionN = 0; regionFront = null; rectSel = null; regFromRect = false;
+    boxSel = null; boxDrag = null; hideBoxView(); syncBoxButtons();
     paintMarks();
     syncInfo(`выделение снято: ${n} вершин`);
     return n;
@@ -3510,13 +3828,17 @@ export function initSculpt(opts) {
       'центра. С зажатым <b>Shift</b> — купол наружу.',
     measure: 'Два клика по поверхности — расстояние в мм (и разница по осям). ' +
       'Третий клик начинает новую пару.',
-    rect: '<b>Растяните рамку</b> по кузову: стороны строго по осям экрана, выделяются ' +
-      'только видимые грани и только та сторона, которой больше в рамке. Дальше ' +
-      '«<b>⇄ Зеркально</b>» — часть другой стороны внутри той же рамки <b>вырезается</b>, ' +
-      'а на её место встаёт <b>полная копия</b> выделенного (свои вершины и грани, ' +
-      'зеркало y → −y); кромка копии привязывается к ближайшим оставшимся вершинам, ' +
-      'щели зашиваются треугольниками — сетка остаётся замкнутой. «Радиус» — в каких ' +
-      'пределах искать эти ближайшие вершины. Копия отменяется Ctrl+Z.',
+    rect: '<b>Растяните рамку</b> по кузову — на её месте встанет <b>куб</b> (жёлтый), ' +
+      'а бирюзовый рядом показывает, куда ляжет копия. Куб можно <b>тащить за центр</b> ' +
+      '(зелёная ручка) или <b>Shift + протяжка внутри куба</b>, ' +
+      'и <b>тянуть за шесть граней</b> (жёлтые ручки) — размер меняется по ' +
+      'осям кузова. Кнопка «<b>⇄ Сторона</b>» переворачивает куб на другую сторону, то есть ' +
+      'меняет направление зеркалирования. Дальше «<b>⇄ Зеркально</b>» — часть другой ' +
+      'стороны под кубом <b>вырезается</b>, а на её место встаёт <b>полная копия</b> ' +
+      'выделенного (свои вершины и грани, зеркало y → −y); кромка копии привязывается к ' +
+      'ближайшим оставшимся вершинам, щели зашиваются треугольниками — сетка остаётся ' +
+      'замкнутой. «Радиус» — в каких пределах искать эти ближайшие вершины. ' +
+      'Копия отменяется Ctrl+Z, «✕ Убрать куб» оставляет выделение.',
     groove: '<b>Протяните линию по кузову</b> — вдоль неё, на всю длину протяжки, ' +
       'встанет <b>канавка сечением в половину цилиндра</b> (ширина = ползунок «Ширина», ' +
       'глубина = «Глубина»; глубина, равная половине ширины, даёт ровный полукруг). ' +
@@ -3599,6 +3921,7 @@ export function initSculpt(opts) {
     const show = (id, v) => { const e = $(id); if (e) e.classList.toggle('hd', !v); };
     show('sc-amtrow', tool === 'select' || tool === 'lite');
     show('sc-actions', tool === 'select' || tool === 'rect');
+    show('sc-boxrow', tool === 'rect');
     show('sc-extrude-row', tool === 'select' || tool === 'rect');
     show('sc-pinchrow', tool === 'select' || tool === 'rect');
     show('sc-shaperow', tool === 'shape');
@@ -3657,7 +3980,8 @@ export function initSculpt(opts) {
     if (hint) hint.innerHTML = HINTS[tool] || HINTS.select;
     if (tool !== 'measure') { measPts = []; measLine.visible = false; }
     if (!tool) hideCursor();
-    if (tool !== 'rect') { rectStart = null; rectLast = null; hideMarquee(); }
+    if (tool !== 'rect') { rectStart = null; rectLast = null; hideMarquee(); hideBoxView(); }
+    else showBox();
     block = null; allow = null;   // маска лицевых граней считается заново на каждом штрихе
     if (tool !== 'point') { ptSnap = null; lastPt = null; }
     syncRows();
@@ -3682,6 +4006,12 @@ export function initSculpt(opts) {
     lastW = null;                            // новый штрих — новый отсчёт шага
     try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
     if (tool === 'rect') {
+      const bh = boxHit(e.clientX, e.clientY);
+      if (bh && boxDragStart(bh, e)) return;      // тянем ручку куба, а не новую рамку
+      if (boxSel && e.shiftKey) {                 // Shift + протяжка внутри куба — перенос
+        const c0 = hitPoint(e.clientX, e.clientY);
+        if (c0 && inBox(c0[0], c0[1], c0[2]) && boxDragStart(null, e, c0)) return;
+      }
       rectStart = [e.clientX, e.clientY];
       rectLast = [e.clientX, e.clientY];
       showMarquee(e.clientX, e.clientY, e.clientX, e.clientY);
@@ -3738,6 +4068,7 @@ export function initSculpt(opts) {
     updateCursor(e);                         // кольцо кисти видно до нажатия
     if (!painting || !tool) return;
     if (tool === 'rect') {
+      if (boxDrag) { boxDragAt(e); return; }
       if (rectStart) { rectLast = [e.clientX, e.clientY]; showMarquee(rectStart[0], rectStart[1], e.clientX, e.clientY); }
     }
     else if (tool === 'point') addPointsAt(e.clientX, e.clientY);
@@ -3792,6 +4123,13 @@ export function initSculpt(opts) {
     }
   };
   cvs.addEventListener('pointerup', (e) => {
+    if (tool === 'rect' && boxDrag) {
+      boxDragAt(e);
+      boxDragEnd();
+      painting = false;
+      try { cvs.releasePointerCapture(e.pointerId); } catch (_) {}
+      return;
+    }
     if (tool === 'rect' && rectStart) {
       const [x0, y0] = rectStart;
       const [x1, y1] = rectLast || [e.clientX, e.clientY];
@@ -4006,6 +4344,8 @@ export function initSculpt(opts) {
   });
   on('sc-deselect', deselect);
   on('sc-mirror', mirrorCopy);
+  on('sc-boxflip', () => { if (!flipBox()) return; });
+  on('sc-boxdrop', () => { dropBox(); });
   on('sc-proj-save', saveProject);
   on('sc-proj-load', () => { const f = $('sc-file'); if (f) f.click(); });
   on('sc-file', (e) => {
@@ -4031,6 +4371,7 @@ export function initSculpt(opts) {
     pos0.fill(0); pos0.set(posInit.subarray(0, Math.min(posInit.length, pos0.length)));
     pos.fill(0); pos.set(posInit.subarray(0, Math.min(posInit.length, pos.length)));
     reg.fill(0); regionN = 0; regionFront = null;
+    boxSel = null; boxDrag = null; rectSel = null; regFromRect = false; hideBoxView(); syncBoxButtons();
     dead.fill(0); delTotal = 0;
     added.fill(0); addedTotal = 0; front.fill(1); block = null; allow = null;
     setIndex(origIndex.slice());
@@ -4234,6 +4575,51 @@ export function initSculpt(opts) {
     get groove() { return grooveInfo; },
     grooveAt(clientX, clientY) { const p = hitPoint(clientX, clientY); return p; },
     rectSelect,
+    /* куб-рамка: состояние и ручное управление (то же, что мышью) */
+    get box() { return boxSel ? { ...boxSel, to: boxTo, side: boxSideIs(boxSel) } : null; },
+    get boxPtr() { return boxSel ? boxCenter() : null; },
+    get boxSizeMM() { return boxSel ? boxSize().map(v => v / U) : null; },
+    boxFlip: flipBox,
+    boxDrop: dropBox,
+    boxMoveBy(dx, dy, dz) {          // сдвиг куба в единицах кузова
+      if (!boxSel) return null;
+      const b = boxSel, side = boxSideIs(b);
+      boxSel = boxClampSide({ x0: b.x0 + dx, x1: b.x1 + dx, y0: b.y0 + dy, y1: b.y1 + dy, z0: b.z0 + dz, z1: b.z1 + dz }, side);
+      applyBoxSelection(); syncBoxView(); syncBoxButtons(); syncInfo(boxText());
+      return regionN;
+    },
+    boxResize(axis, sign, delta) {   // подвинуть грань куба
+      if (!boxSel) return null;
+      const b = { ...boxSel }, minS = BOX_MIN_MM * U, side = boxSideIs(b);
+      if (axis === 0) { if (sign > 0) b.x1 = Math.max(b.x1 + delta, b.x0 + minS); else b.x0 = Math.min(b.x0 - delta, b.x1 - minS); }
+      else if (axis === 1) {
+        if (sign > 0) b.y1 = Math.max(b.y1 + delta, b.y0 + minS); else b.y0 = Math.min(b.y0 - delta, b.y1 - minS);
+        boxClampSide(b, side);
+      } else { if (sign > 0) b.z1 = Math.max(b.z1 + delta, b.z0 + minS); else b.z0 = Math.min(b.z0 - delta, b.z1 - minS); }
+      boxSel = b;
+      applyBoxSelection(); syncBoxView(); syncBoxButtons(); syncInfo(boxText());
+      return regionN;
+    },
+    /** экранные координаты ручки — тестам, чтобы «взять» её мышью */
+    boxHandleAt(kind, axis, sign) {
+      const g = ensureBox();
+      if (!g || !boxSel) return null;
+      const h = kind === 'move' ? boxMove
+        : boxHandles.find(x => x.userData.boxHandle === 'face' && x.userData.axis === axis && x.userData.sign === sign);
+      if (!h) return null;
+      syncBoxView();
+      if (boxGroup && boxGroup.updateMatrixWorld) boxGroup.updateMatrixWorld(true);
+      const v = h.position.clone();
+      mesh.localToWorld(v);
+      v.project(camera);
+      return [(v.x * 0.5 + 0.5) * innerWidth, (-v.y * 0.5 + 0.5) * innerHeight];
+    },
+    get boxVisible() { return !!(boxGroup && boxGroup.visible); },
+    get boxGhost() {
+      if (!boxSel || !boxGhost) return null;
+      const b = boxSel;
+      return { x0: b.x0, x1: b.x1, y0: -b.y1, y1: -b.y0, z0: b.z0, z1: b.z1 };
+    },
     saveProject,
     loadProject,
     get dirty() { return dirty; },
