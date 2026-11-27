@@ -150,7 +150,7 @@
     <span><kbd>ЛКМ</kbd> инструмент</span>
     <span><kbd>ПКМ</kbd> вращать</span>
     <span><kbd>колесо</kbd> масштаб</span>
-    <span><kbd>1</kbd>…<kbd>8</kbd> инструменты</span>
+    <span><kbd>1</kbd>…<kbd>9</kbd> инструменты</span>
     <span><kbd>Esc</kbd> выход</span>
   </div>
 </div>
@@ -167,6 +167,7 @@
     <button class="btn" id="sc-measure">6 📏 Измерить</button>
     <button class="btn wide" id="sc-rect">7 ▭ Рамка — зеркальная копия</button>
     <button class="btn wide" id="sc-groove">8 ╱ Борозда — ровный желоб по прямой</button>
+    <button class="btn wide" id="sc-rope">9 ᴖ Канат — привязать к граням и прожечь канал</button>
   </div>
   <p class="hint hd" id="sc-hint"><b>Закрасьте участок</b> левой кнопкой (правой — вращать,
     колесом — приблизить); кольцо под курсором показывает размер кисти. Дальше — кнопки
@@ -227,6 +228,20 @@
     <button class="btn" id="sc-shrink" title="Сузить выделение на кольцо (как Ctrl+- в Blender)">－ Уже</button>
     <button class="btn" id="sc-invert" title="Выделить всё, кроме закрашенного">⇋ Инверсия</button>
     <button class="btn" id="sc-relax" title="Выровнять узлы вдоль поверхности, не меняя форму">⇢ Расслабить</button>
+  </div>
+
+  <div class="sc-row hd" id="sc-roperow" style="display:grid;gap:6px">
+    <div class="row">
+      <span class="tag" style="width:auto">Толщина</span>
+      <input type="range" id="sc-ropew" min="0.4" max="12" step="0.1" value="2.5">
+      <span class="val" id="sc-ropewv">2.5 мм</span>
+    </div>
+    <div class="presets">
+      <button class="btn" id="sc-burn" title="Раскалённый нож: прорезать в кузове канал ровно под форму каната">🔥 Прожечь</button>
+      <button class="btn" id="sc-rope-del" title="Убрать канат из сцены (кузов не меняется)">⌫ Убрать канат</button>
+      <button class="btn" id="sc-rope-save" title="Сохранить канат отдельным файлом 3MF">⬇ Канат</button>
+    </div>
+    <p class="hint" id="sc-ropeinfo">канатов нет — проведите канат по кузову</p>
   </div>
 
   <h2>Вид и проверка</h2>
@@ -367,7 +382,7 @@
   <span><b>ЛКМ</b> — инструмент</span>
   <span><b>ПКМ</b> — вращать</span>
   <span><b>колесо</b> — приблизить</span>
-  <span><kbd>1</kbd>…<kbd>7</kbd> — инструменты</span>
+  <span><kbd>1</kbd>…<kbd>9</kbd> — инструменты</span>
   <span><kbd>0</kbd> — снять выделение</span>
   <span><kbd>Esc</kbd> — выход</span>
   <span><kbd>Ctrl</kbd>+<kbd>Z</kbd> — отмена</span>

@@ -1,0 +1,165 @@
+/* ============================================================
+   Канат: путь, привязанный к граням кузова, и его отдельный объект-трубка.
+
+   Что здесь считается (и почему именно так):
+   • Путь каната — это набор точек, каждая из которых получена попаданием луча
+     в грань кузова, поэтому канат повторяет все изгибы поверхности и «привязан»
+     к её треугольникам (при правке кузова он остаётся там, где лёг).
+   • Перед постройкой трубки путь пересэмплируется с ровным шагом: иначе на
+     медленных участках штриха кольца лепятся друг на друга, а на быстрых —
+     трубка гранёная.
+   • «Верх» сечения берётся из нормали поверхности, а не из случайного вектора:
+     так канат не закручивается вокруг своей оси и его можно класть на борт.
+   • Трубка замкнута (торцы — веера): её можно проверить той же проверкой, что и
+     кузов, и выгрузить отдельным объектом.
+
+   Всё в единицах модели (U = 5.8824 ед./мм).
+   ============================================================ */
+
+/** длина ломаной, ед. модели */
+export function pathLen(pts) {
+  let L = 0;
+  for (let i = 1; i < pts.length; i++) {
+    L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1], pts[i][2] - pts[i - 1][2]);
+  }
+  return L;
+}
+
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const mul = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+/** сгладить ломаную усреднением по трём (концы остаются на месте) */
+export function smoothPath(pts, nrms, iters = 2) {
+  let p = pts.map(q => q.slice());
+  let n = nrms ? nrms.map(q => q.slice()) : null;
+  for (let k = 0; k < iters; k++) {
+    const q = p.map((v, i) => (i === 0 || i === p.length - 1) ? v.slice()
+      : [(p[i - 1][0] + 2 * v[0] + p[i + 1][0]) / 4,
+         (p[i - 1][1] + 2 * v[1] + p[i + 1][1]) / 4,
+         (p[i - 1][2] + 2 * v[2] + p[i + 1][2]) / 4]);
+    p = q;
+    if (n) n = n.map((v, i) => (i === 0 || i === n.length - 1) ? v.slice()
+      : norm([(n[i - 1][0] + 2 * v[0] + n[i + 1][0]) / 4,
+              (n[i - 1][1] + 2 * v[1] + n[i + 1][1]) / 4,
+              (n[i - 1][2] + 2 * v[2] + n[i + 1][2]) / 4]));
+  }
+  return { pts: p, nrms: n };
+}
+
+/** пересадить ломаную на ровный шаг step; концы сохраняются */
+export function resamplePath(pts, nrms, step) {
+  if (pts.length < 2 || !(step > 0)) return { pts: pts.map(p => p.slice()), nrms: nrms ? nrms.map(n => n.slice()) : null };
+  const out = [pts[0].slice()];
+  const outN = nrms ? [nrms[0].slice()] : null;
+  let carry = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const seg = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    if (seg < 1e-9) continue;
+    let t = step - carry;
+    while (t <= seg) {
+      const f = t / seg;
+      out.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]);
+      if (nrms && outN) {
+        const A = nrms[i - 1], B = nrms[i] || A;
+        outN.push(norm([A[0] + (B[0] - A[0]) * f, A[1] + (B[1] - A[1]) * f, A[2] + (B[2] - A[2]) * f]));
+      }
+      t += step;
+    }
+    carry = seg - (t - step);
+  }
+  const last = pts[pts.length - 1];
+  const tail = out[out.length - 1];
+  if (Math.hypot(last[0] - tail[0], last[1] - tail[1], last[2] - tail[2]) > step * 0.35) {
+    out.push(last.slice());
+    if (nrms && outN) outN.push((nrms[nrms.length - 1] || [0, 1, 0]).slice());
+  }
+  return { pts: out, nrms: outN };
+}
+
+/** касательная в точке i (центральная разность, на концах — односторонняя) */
+export function tangentAt(pts, i) {
+  const n = pts.length;
+  const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+  const t = sub(b, a);
+  if (Math.hypot(t[0], t[1], t[2]) < 1e-9) return [1, 0, 0];
+  return norm(t);
+}
+
+/**
+ * Трубка по пути — отдельный объект каната.
+ * @param {Array<[number,number,number]>} path центры колец (на поверхности)
+ * @param {Array<[number,number,number]>|null} nrms нормали поверхности в тех же точках
+ * @param {number} radius радиус трубки, ед. модели
+ * @param {number} sides граней в кольце
+ * @param {number} off подъём оси над поверхностью (0 — вровень, radius — лежит сверху)
+ */
+export function tubeArrays(path, nrms, radius, sides = 10, off = 0) {
+  const n = path.length;
+  const S = Math.max(3, sides | 0);
+  const verts = n * S + 2;
+  const positions = new Float32Array(verts * 3);
+  const index = new Uint32Array(((n - 1) * S * 2 + S * 2) * 3);
+  let ii = 0;
+  const put = (v, p) => { positions[v * 3] = p[0]; positions[v * 3 + 1] = p[1]; positions[v * 3 + 2] = p[2]; };
+
+  for (let i = 0; i < n; i++) {
+    const t = tangentAt(path, i);
+    let up = nrms && nrms[i] ? nrms[i] : [0, 1, 0];
+    up = sub(up, mul(t, dot(up, t)));            // нормаль поверхности без касательной части
+    if (Math.hypot(up[0], up[1], up[2]) < 1e-6) {
+      up = Math.abs(t[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+      up = sub(up, mul(t, dot(up, t)));
+    }
+    up = norm(up);
+    const e1 = cross(up, t);                     // e1 × up = t — обход колец правый
+    const c = off ? [path[i][0] + (nrms && nrms[i] ? nrms[i][0] : up[0]) * off,
+                     path[i][1] + (nrms && nrms[i] ? nrms[i][1] : up[1]) * off,
+                     path[i][2] + (nrms && nrms[i] ? nrms[i][2] : up[2]) * off] : path[i];
+    for (let j = 0; j < S; j++) {
+      const a = (j / S) * Math.PI * 2;
+      put(i * S + j, [c[0] + radius * (Math.cos(a) * e1[0] + Math.sin(a) * up[0]),
+                      c[1] + radius * (Math.cos(a) * e1[1] + Math.sin(a) * up[1]),
+                      c[2] + radius * (Math.cos(a) * e1[2] + Math.sin(a) * up[2])]);
+    }
+  }
+  /* боковина */
+  for (let i = 0; i < n - 1; i++) {
+    for (let j = 0; j < S; j++) {
+      const j2 = (j + 1) % S;
+      const a = i * S + j, b = i * S + j2, c = (i + 1) * S + j2, d = (i + 1) * S + j;
+      index[ii++] = a; index[ii++] = b; index[ii++] = c;
+      index[ii++] = a; index[ii++] = c; index[ii++] = d;
+    }
+  }
+  /* торцы: веера к центрам крайних колец */
+  const c0 = n * S, c1 = n * S + 1;
+  const centre = (v) => {
+    let x = 0, y = 0, z = 0;
+    for (let j = 0; j < S; j++) { const k = v * S + j; x += positions[k * 3]; y += positions[k * 3 + 1]; z += positions[k * 3 + 2]; }
+    return [x / S, y / S, z / S];
+  };
+  put(c0, centre(0)); put(c1, centre(n - 1));
+  for (let j = 0; j < S; j++) {
+    const j2 = (j + 1) % S;
+    index[ii++] = c0; index[ii++] = j2; index[ii++] = j;             // начало: нормаль −t
+    index[ii++] = c1; index[ii++] = (n - 1) * S + j; index[ii++] = (n - 1) * S + j2; // конец: +t
+  }
+  return { positions, index, rings: n, sides: S, verts, radius, off };
+}
+
+/** габарит трубки — для отчётов и тестов */
+export function tubeStats(t) {
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  const P = t.positions;
+  for (let i = 0; i < P.length; i += 3) {
+    if (P[i] < x0) x0 = P[i]; if (P[i] > x1) x1 = P[i];
+    if (P[i + 1] < y0) y0 = P[i + 1]; if (P[i + 1] > y1) y1 = P[i + 1];
+    if (P[i + 2] < z0) z0 = P[i + 2]; if (P[i + 2] > z1) z1 = P[i + 2];
+  }
+  return { verts: t.verts, rings: t.rings, sides: t.sides, tris: t.index.length / 3,
+    size: [x1 - x0, y1 - y0, z1 - z0], min: [x0, y0, z0], max: [x1, y1, z1] };
+}
