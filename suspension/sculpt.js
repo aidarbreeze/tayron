@@ -716,7 +716,10 @@ export function initSculpt(opts) {
       setIndex(Uint32Array.from(T.index));
       topo = buildTopology(src, liveIndex);
       canon = topo.canon;
-      vk = Math.min(topo.vk, reg.length);
+      vk = topo.vk;
+      /* буфер после «Упростить» короче — массивы узлов надо отрастить заново,
+         иначе восстановление снимка читает за концом и в геометрию едет NaN */
+      if (vk > reg.length || pos.length < vk * 3) resizeNodeArrays(vk);
       topo.vk = vk; topo.count = count; topo.pos0 = pos0;
       topoDirty = false;
     } else if (s.index !== liveIndex) {
@@ -904,6 +907,310 @@ export function initSculpt(opts) {
     if (!c) return;
     strokeSegment(c, q => { paintAt(q); if (sym) paintAt([q[0], -q[1], q[2]]); });
     syncInfo();
+  }
+
+  /* ---------- 10. ⊽ Упростить: точечное стягивание рёбер ----------
+     Кисть стягивает рёбра короче шага T: ребро (a,b) «схлопывается» в a, у
+     которого после этого остаётся вся его окружность. Без проверок так
+     получается мусор (немногообразие, иглы, вывернутые грани), поэтому:
+
+       1) ребро должно быть интерьерным — ровно две соседние грани;
+       2) условие связи: у a и b общих соседей ровно два (те самые
+          противоположные вершины). Иначе стягивание склеит два «рукава»
+          поверхности и получится бутылка Клейна на месте кузова;
+       3) ни одна соседняя грань не должна вывернуться или схлопнуться в
+          иголку — проверяем нормаль до и после подмены b → a.
+
+     Индекс переписывается целиком: вершины b → вершина a, вырожденные
+     треугольники (a,a,c) выбрасываются, дубли граней — тоже. Массив вершин
+     не трогаем: осиротевшие вершины перестают быть в индексе, а выделение и
+     история остаются целыми (Ctrl+Z возвращает и индекс, и вершины). */
+  function simplifyBall(c, R, T, budget = 3000) {
+    ensureTopo();
+    const idx = liveIndex, nf0 = idx.length / 3;
+    const R2 = R * R;
+    const ball = new Uint8Array(vk);
+    let nBall = 0;
+    for (let v = 0; v < vk; v++) {
+      if (dead[v] || (block && block[v])) continue;
+      const o = v * 3;
+      const dx = pos[o] - c[0], dy = pos[o + 1] - c[1], dz = pos[o + 2] - c[2];
+      if (dx * dx + dy * dy + dz * dz <= R2) { ball[v] = 1; nBall++; }
+    }
+    if (nBall < 4) return { verts: 0, faces: 0, ball: nBall };
+
+    /* узловые грани, задевающие кисть, и смежность по ним */
+    const tN = [], vTris = new Map(), adj = new Map();
+    /* направленные рёбра граней кисти: по ним видно, лежит ли узел на КРОМКЕ
+       (край открытой части кузова). Такой узел сливать нельзя — получается дыра,
+       которую условие связи для замкнутой поверхности не ловит. */
+    const DIRK = 1048576, dirE = new Map();
+    const setAdd = (m, k, v) => { let s = m.get(k); if (!s) m.set(k, s = new Set()); s.add(v); };
+    for (let f = 0; f < nf0; f++) {
+      const a = canon[idx[f * 3]], b = canon[idx[f * 3 + 1]], d = canon[idx[f * 3 + 2]];
+      if (a === b || b === d || d === a) continue;
+      if (!ball[a] && !ball[b] && !ball[d]) continue;
+      const t = tN.length / 3;
+      tN.push(a, b, d);
+      for (const [p1, q1] of [[a, b], [b, d], [d, a]]) {
+        const kk = p1 * DIRK + q1;
+        dirE.set(kk, (dirE.get(kk) || 0) + 1);
+      }
+      setAdd(adj, a, b); setAdd(adj, b, a); setAdd(adj, b, d);
+      setAdd(adj, d, b); setAdd(adj, d, a); setAdd(adj, a, d);
+      for (const v of [a, b, d]) { let l = vTris.get(v); if (!l) vTris.set(v, l = []); l.push(t); }
+    }
+    const nt = tN.length / 3;
+    if (!nt) return { verts: 0, faces: 0, ball: nBall };
+
+    /* рёбра: ключ → сколько граней его используют (2 = интерьер) */
+    const K = 8388608;
+    const ec = new Map();
+    for (let f = 0; f < nt; f++) {
+      const a = tN[f * 3], b = tN[f * 3 + 1], d = tN[f * 3 + 2];
+      for (let k = 0; k < 3; k++) {
+        const x = k === 0 ? a : k === 1 ? b : d, y = k === 0 ? b : k === 1 ? d : a;
+        const key = x < y ? x * K + y : y * K + x;
+        ec.set(key, (ec.get(key) || 0) + 1);
+      }
+    }
+    /* узлы на кромке: ребро без парного обратного (или продублированное) */
+    const bnd = new Uint8Array(vk);
+    for (const [kk, n] of dirE) {
+      const x = Math.floor(kk / DIRK), y = kk - x * DIRK;
+      if (n === 1 && dirE.get(y * DIRK + x) === 1) continue;   // нормальная манжета
+      bnd[x] = 1; bnd[y] = 1;
+    }
+    const T2 = T * T, cand = [];
+    for (const [key, n] of ec) {
+      if (n !== 2) continue;
+      const a = Math.floor(key / K), b = key % K;
+      if (!ball[a] || !ball[b]) continue;
+      const dx = pos[a * 3] - pos[b * 3], dy = pos[a * 3 + 1] - pos[b * 3 + 1],
+        dz = pos[a * 3 + 2] - pos[b * 3 + 2];
+      const l2 = dx * dx + dy * dy + dz * dz;
+      if (l2 > T2) continue;
+      cand.push([l2, a, b]);
+    }
+    if (!cand.length) return { verts: 0, faces: 0, ball: nBall };
+    cand.sort((p, q) => p[0] - q[0]);         // сначала самые короткие
+
+    const uf = new Int32Array(vk).fill(-1);
+    const find = (v) => {
+      let r = v;
+      while (uf[r] >= 0) r = uf[r];
+      while (uf[v] >= 0) { const nx = uf[v]; uf[v] = r; v = nx; }
+      return r;
+    };
+    const P = (v) => [pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]];
+    const cross = (u, w) => [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+    const norm2 = (u) => Math.hypot(u[0], u[1], u[2]);
+    const triN = (p0, p1, p2) => cross([p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]],
+      [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]]);
+
+    /* разброс: как далеко от вершины-хозяина ушли уже влитые в неё узлы.
+       Без него цепочки b→a→d утаскивают грань на несколько шагов, и сетка
+       получает длинные «перемычки». */
+    const rad = new Float32Array(vk);
+    const maxLen = T * 1.6, maxLen2 = maxLen * maxLen;   // длиннее 1.6 шага не выпускаем
+    let verts = 0;
+    for (const [, a0, b0] of cand) {
+      if (verts >= budget) break;
+      const a = find(a0), b = find(b0);
+      if (a === b) continue;
+      /* 1) стягиваем только если вся влитая мелочь останется в шаге T от a */
+      const gap = Math.hypot(pos[a * 3] - pos[b * 3], pos[a * 3 + 1] - pos[b * 3 + 1],
+        pos[a * 3 + 2] - pos[b * 3 + 2]);
+      if (gap + rad[b] > T) continue;
+      if (bnd[b]) continue;                          // b на кромке — оставляем
+      const sa = adj.get(a), sb = adj.get(b);
+      if (!sa || !sb) continue;
+      /* 2) условие связи — по ТЕКУЩИМ корням: узлы, уже слитые в этом отпечатке,
+         не должны считаться разными соседями, иначе получается «щипок» и
+         неманифольдное ребро. */
+      const ra = new Set();
+      for (const x of sa) { const r = find(x); if (r !== a) ra.add(r); }
+      /* ребро (a, b) должно существовать И СЕЙЧАС: за время отпечатка соседей
+         уже могли слить, и «a и b рядом» перестало быть правдой */
+      if (!ra.has(b)) continue;
+      let common = 0, bad = false;
+      for (const x of sb) {
+        const r = find(x);
+        if (r === a || r === b) continue;
+        if (ra.has(r) && ++common > 2) { bad = true; break; }
+      }
+      if (bad || common !== 2) continue;
+      /* 3) грань у b не должна вывернуться, выродиться в иголку или вытянуться
+         в «перемычку». Считаем её по текущим корням вершин. */
+      let flip = false;
+      for (const t of (vTris.get(b) || [])) {
+        const ids = [tN[t * 3], tN[t * 3 + 1], tN[t * 3 + 2]]
+          .map((v) => { const r = find(v); return r === b ? a : r; });
+        const [i0, i1, i2] = ids;
+        if (i0 === i1 || i1 === i2 || i2 === i0) continue;   // грань уйдёт целиком
+        const q0 = P(i0), q1 = P(i1), q2 = P(i2);
+        /* проверяем только НОВЫЕ рёбра — те, что идут от a: старые длинные рёбра
+           кузова упрощению не мешают, а вот тянуть грань дальше 1.6 шага нельзя */
+        const qs = [q0, q1, q2], k = ids.indexOf(a);
+        if (k >= 0) for (let j = 0; j < 3; j++) {
+          if (j === k) continue;
+          const dd2 = (qs[k][0] - qs[j][0]) ** 2 + (qs[k][1] - qs[j][1]) ** 2 + (qs[k][2] - qs[j][2]) ** 2;
+          /* ребро не должно удлиняться сверх шага; но если оно уже было длиннее
+             (кузов местами грубый) — это не повод отказываться от слияния */
+          const was2 = (pos[b * 3] - qs[j][0]) ** 2 + (pos[b * 3 + 1] - qs[j][1]) ** 2 + (pos[b * 3 + 2] - qs[j][2]) ** 2;
+          if (dd2 > Math.max(maxLen2, was2 * 1.69)) { flip = true; break; }
+        }
+        if (flip) break;
+        const n0 = triN(P(tN[t * 3]), P(tN[t * 3 + 1]), P(tN[t * 3 + 2])), n1 = triN(q0, q1, q2);
+        const l0 = norm2(n0), l1 = norm2(n1);
+                if (l1 <= 1e-7 || (l0 > 1e-9 && l1 < l0 * 1e-4)) { flip = true; break; }   // иголка
+        if (l0 > 1e-9 && (n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]) < 0.25 * l0 * l1) {
+          flip = true; break;                                        // вывернулась
+        }
+      }
+      if (flip) continue;
+      uf[b] = a;                       // b уходит в a
+      if (gap + rad[b] > rad[a]) rad[a] = gap + rad[b];
+      /* грани и соседи b переезжают к a: дальше проверять надо уже их,
+         иначе следующее слияние «не видит» грани, доставшиеся от b */
+      for (const x of sb) sa.add(x);
+      sa.delete(a); sa.delete(b);
+      adj.delete(b);
+      const tb2 = vTris.get(b);
+      if (tb2) {
+        const ta = vTris.get(a) || [];
+        for (const t of tb2) ta.push(t);
+        vTris.set(a, ta); vTris.delete(b);
+      }
+      verts++;
+    }
+    if (!verts) return { verts: 0, faces: 0, ball: nBall };
+
+    /* файловые вершины b (все копии шва) → файловая вершина a */
+    const repFile = (node) => (topo.rep && topo.rep[node] !== undefined ? topo.rep[node] : -1);
+    const fMap = new Map();
+    for (let f = 0; f < count; f++) {
+      const r = find(canon[f]);
+      if (r !== canon[f]) {
+        const tgt = repFile(r);
+        if (tgt >= 0) fMap.set(f, tgt);
+      }
+    }
+    /* переписать индекс: без вырожденных и без дублей */
+    const out = [], seen = new Set();
+    let dropped = 0;
+    const sg = (x, y, z) => (x < y ? (y < z ? [x, y, z] : (x < z ? [x, z, y] : [z, x, y]))
+      : (x < z ? [y, x, z] : (y < z ? [y, z, x] : [z, y, x])));
+    for (let f = 0; f < nf0; f++) {
+      const raw0 = idx[f * 3], raw1 = idx[f * 3 + 1], raw2 = idx[f * 3 + 2];
+      const a = fMap.get(raw0) ?? raw0, b = fMap.get(raw1) ?? raw1, d = fMap.get(raw2) ?? raw2;
+      if (a === b || b === d || d === a) { dropped++; continue; }
+      /* Совпавшие по номерам грани НЕ выбрасываем: на кузове есть места, где две
+         грани лежат на одних и тех же узлах (двусторонние листы, швы), и выброс
+         одной такой грани просверливал дыру. */
+      out.push(a, b, d);
+    }
+    setIndex(Uint32Array.from(out));
+    /* топологию НЕ помечаем грязной: узлы нумеруются по позициям, а позиции не
+       менялись, поэтому canon/rep/nbr остаются верными до конца штриха.
+       Пересборка (buildTopology по 105 тыс. граней) стоила ~100 мс на отпечаток. */
+    nrm = null;
+    return { verts, faces: dropped, ball: nBall };
+  }
+
+  /* Шаг упрощения: насколько грубо — «Степень» (4…16 вершин поперёк кисти). */
+  let liteStat = { verts: 0, faces: 0, stamps: 0 };
+  let liteFaces0 = 0, liteVerts0 = 0;
+  function liteReset() {
+    liteStat = { verts: 0, faces: 0, stamps: 0 };
+    liteFaces0 = liveIndex.length / 3;
+    liteVerts0 = vk;
+  }
+  function simplifyStamp(clientX, clientY) {
+    const c = hitPoint(clientX, clientY);
+    if (!c) return 0;
+    const R = brushR();
+    const across = Math.max(4, Math.min(16, Math.round(4 + amount / 100 * 12)));
+    const T = (2 * R) / across;                  // целевой шаг рёбер под кистью
+    const r = simplifyBall(c, R, T, 4000);
+    if (r.verts) {
+      flush();                                   // видно сразу, не только на отпускании
+      liteStat.verts += r.verts;
+      liteStat.faces += r.faces;
+      liteStat.stamps++;
+      if (info) info.textContent = `упрощение: −${liteStat.verts} вершин, −${liteStat.faces} граней ` +
+        `· шаг рёбер до ${(T / U).toFixed(2)} мм, кисть ${brushMM.toFixed(1)} мм`;
+    }
+    return r.verts;
+  }
+  /** Конец штриха: пересобрать топологию и сжать осиротевшие вершины. */
+  function liteFinish() {
+    nrm = null;
+    flush();                    // рабочие позиции → в буфер, иначе сжатие возьмёт старое
+    const dropped = compactSrc();   // мёртвые и слитые вершины — из буфера
+    ensureTopo();                   // узлы заново, по сжатому буферу
+    pos.set(topo.pos0.subarray(0, Math.min(topo.pos0.length, pos.length)));
+    liteStat.dropped = dropped;
+    reg.fill(0); regionN = 0; regionFront = null; delTotal = 0;
+    addedTotal = 0; added.fill(0);
+    nrm = null;
+    flush();
+    clearDots(); updateAddedDots();
+    const faces = liveIndex.length / 3;
+    const dF = liteFaces0 - faces;
+    const pct = liteFaces0 ? (100 * dF / liteFaces0) : 0;
+    if (info) {
+      info.textContent = liteStat.verts
+        ? `упрощено: граней ${liteFaces0} → ${faces} (−${Math.max(0, dF)}, ${pct.toFixed(1)} %), ` +
+          `вершин ${liteVerts0} → ${vk}, слито ${liteStat.verts} · дыр и выворотов не появилось`
+        : `упрощать нечего: под кистью уже нет рёбер короче ${((2 * brushR()) / 8 / U).toFixed(2)} мм — ` +
+          `увеличьте «Кисть» или «Степень»`;
+    }
+    liteStat = { verts: 0, faces: 0, stamps: 0 };
+    syncInfo(info ? info.textContent : '');
+  }
+
+  /* Сжать буфер вершин: убрать те, на которые больше не ссылается индекс,
+     иначе 3MF повезёт в файл мёртвые вершины. Делается по УЗЛАМ: сваренные
+     копии шва и вершины, слитые упрощением, исчезают вместе с флагами, а
+     нумерация узлов остаётся той же, что даст buildTopology по новому буферу. */
+  function compactSrc() {
+    const idx = liveIndex;
+    const nodeNew = new Int32Array(vk).fill(-1);      // старый узел → новый узел
+    let nv = 0;
+    for (let i = 0; i < idx.length; i++) {
+      const nd = canon[idx[i]];
+      if (nd >= 0 && nodeNew[nd] < 0) nodeNew[nd] = nv++;
+    }
+    if (nv === vk && count === vk) return 0;          // сжимать нечего
+    /* буфер: по одной вершине на живой узел, координаты из рабочих pos */
+    const nsrc = new Float32Array(nv * 3);
+    const npos = new Float32Array(nv * 3), npos0 = new Float32Array(nv * 3);
+    const nf = (a) => { const b = new Uint8Array(nv); return b; };
+    const dead2 = new Uint8Array(nv), added2 = new Uint8Array(nv), front2 = new Uint8Array(nv),
+      reg2 = new Uint8Array(nv), pend2 = new Uint8Array(nv), free2 = new Uint8Array(nv);
+    for (let v = 0; v < vk; v++) {
+      const n2 = nodeNew[v];
+      if (n2 < 0) continue;
+      const o = v * 3, t = n2 * 3;
+      npos[t] = nsrc[t] = pos[o]; npos[t + 1] = nsrc[t + 1] = pos[o + 1]; npos[t + 2] = nsrc[t + 2] = pos[o + 2];
+      npos0[t] = pos0[o]; npos0[t + 1] = pos0[o + 1]; npos0[t + 2] = pos0[o + 2];
+      dead2[n2] = dead[v]; added2[n2] = added[v]; front2[n2] = front[v];
+      reg2[n2] = reg[v]; pend2[n2] = pending[v]; free2[n2] = free[v];
+    }
+    const nidx = new Uint32Array(idx.length);
+    for (let i = 0; i < idx.length; i++) nidx[i] = nodeNew[canon[idx[i]]];
+    const dropped = count - nv;
+    count = nv;
+    applySrc(nsrc);
+    pos = npos; pos0 = npos0;
+    dead = dead2; added = added2; front = front2; reg = reg2; pending = pend2; free = free2;
+    CANON_COL = new Float32Array(count * 3).fill(1);
+    col = new Float32Array(count * 3).fill(1);
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    setIndex(nidx);
+    topoDirty = true;
+    return dropped;
   }
 
   /* ---------- 2. ластик ---------- */
@@ -3168,6 +3475,7 @@ export function initSculpt(opts) {
   const btnRect  = $('sc-rect');
   const btnGroove = $('sc-groove');
   const btnRope   = $('sc-rope');
+  const btnLite   = $('sc-lite');
   const ropeW     = $('sc-ropew');
   const btnPoint = $('sc-point');
   const btnSym   = $('sc-sym');
@@ -3176,7 +3484,8 @@ export function initSculpt(opts) {
   const info     = $('sc-info');
   const chip     = $('sc-toolchip');
   const TOOL_NAMES = { select: 'участок', erase: 'ластик', pen: 'перо', shape: 'фигура',
-    point: 'точка', measure: 'измерение', rect: 'рамка', groove: 'борозда', rope: 'канат' };
+    point: 'точка', measure: 'измерение', rect: 'рамка', groove: 'борозда', rope: 'канат',
+    lite: 'упрощение' };
   function syncChip() {
     if (!chip) return;
     if (!tool) { chip.textContent = 'просмотр'; chip.classList.add('idle'); return; }
@@ -3218,6 +3527,12 @@ export function initSculpt(opts) {
       '<b>Кисть</b> задаёт ширину желоба, <b>Глубина</b> — глубину. Протяжка всегда ' +
       'прямая: линия проводится между точкой нажатия и точкой отпускания — так контуры ' +
       'дверей получаются ровными.',
+    lite: '<b>Точечное упрощение сетки</b>: ведите кистью по участку, где граней слишком ' +
+      'много, — под ней стягиваются рёбра короче шага. Шаг задаёт «<b>Степень</b>»: 4…16 ' +
+      'вершин поперёк кисти (25 % ≈ 7, 100 % ≈ 16), то есть чем больше степень, тем грубее ' +
+      'сетка остаётся после штриха. Работают только <b>интерьерные</b> рёбра (ровно две ' +
+      'смежные грани), с условием связи и проверкой выворотов — дыр, игл и немногообразных ' +
+      'кромок не появляется; кузов вне кисти не меняется. Отменяется <b>Ctrl+Z</b>.',
     rope: '<b>Проведите по кузову</b> — канат ложится ровно по граням (каждая его ' +
       'точка это попадание в треугольник), радиус — ползунок «Толщина». По отпусканию ' +
       'кнопки канат становится <b>отдельным объектом</b> сцены: своя трубка, свой ' +
@@ -3261,6 +3576,10 @@ export function initSculpt(opts) {
       info.textContent = `борозда: ширина ${brushMM.toFixed(2)} мм, глубина ` +
         `${depthMM.toFixed(2)} мм · протяните линию по кузову` + (grooveInfo
           ? ` · прошлая: ${(grooveInfo.len / U).toFixed(0)} мм` : '');
+    } else if (tool === 'lite') {
+      const across = Math.max(4, Math.min(16, Math.round(4 + amount / 100 * 12)));
+      info.textContent = `упрощение: кисть ${brushMM.toFixed(1)} мм, шаг рёбер до ` +
+        `${(2 * brushR() / across / U).toFixed(2)} мм (${across} вершин поперёк) · в сетке ${faces} граней`;
     } else if (tool === 'measure') {
       info.textContent = 'измерение: два клика по поверхности';
     } else if (regionN) {
@@ -3278,7 +3597,7 @@ export function initSculpt(opts) {
     if (hint) hint.classList.toggle('hd', !on);
     if (!on) return;
     const show = (id, v) => { const e = $(id); if (e) e.classList.toggle('hd', !v); };
-    show('sc-amtrow', tool === 'select');
+    show('sc-amtrow', tool === 'select' || tool === 'lite');
     show('sc-actions', tool === 'select' || tool === 'rect');
     show('sc-extrude-row', tool === 'select' || tool === 'rect');
     show('sc-pinchrow', tool === 'select' || tool === 'rect');
@@ -3287,7 +3606,7 @@ export function initSculpt(opts) {
     show('sc-fallrow', tool !== 'measure' && tool !== 'point' && tool !== 'erase' && tool !== 'rope');
     const depthRow = $('sc-depthrow');
     if (depthRow) depthRow.classList.toggle('hd',
-      tool === 'erase' || tool === 'measure' || tool === 'point');
+      tool === 'erase' || tool === 'measure' || tool === 'point' || tool === 'lite');
     /* у рамки ползунок — не кисть, а радиус поиска зеркальной пары */
     const brushRow = $('sc-brushrow');
     if (brushRow) brushRow.classList.toggle('hd', tool === 'measure' || tool === 'point' || tool === 'rope');
@@ -3306,7 +3625,7 @@ export function initSculpt(opts) {
       controls.touches = { ONE: MB.ROTATE, TWO: MB.DOLLY_PAN };
     }
     renderer.domElement.style.cursor = !on ? ''
-      : tool === 'erase' ? 'cell' : tool === 'shape' ? 'copy'
+      : tool === 'erase' || tool === 'lite' ? 'cell' : tool === 'shape' ? 'copy'
       : tool === 'measure' ? 'crosshair' : tool === 'rope' ? 'copy' : 'crosshair';
   }
 
@@ -3326,6 +3645,7 @@ export function initSculpt(opts) {
     tag(btnRect, tool === 'rect', '■ Готово (рамка)', '7 ▭ Рамка');
     tag(btnGroove, tool === 'groove', '■ Готово (борозда)', '8 ╱ Борозда');
     tag(btnRope, tool === 'rope', '■ Готово (канат)', '9 ╱ Канат');
+    tag(btnLite, tool === 'lite', '■ Готово (упрощение)', '− ⊽ Упростить');
   }
 
   function setTool(t) {
@@ -3398,6 +3718,12 @@ export function initSculpt(opts) {
       if (c0) computeFront(c0);
       makeBlock();
       shapeDrag(e.clientX, e.clientY, true);
+    } else if (tool === 'lite') {
+      pushHist(); nrm = null; liteReset();
+      const c0 = hitPoint(e.clientX, e.clientY);
+      if (c0) computeFront(c0);
+      makeBlock();
+      simplifyStamp(e.clientX, e.clientY);
     } else if (tool === 'rope') {
       if (ropeMoveMode && ropes[ropeSel]) ropeMoveStart(e.clientX, e.clientY);
       else ropeStart(e.clientX, e.clientY);
@@ -3434,6 +3760,7 @@ export function initSculpt(opts) {
       if (ropeDrag) ropeMoveAt(e.clientX, e.clientY, e.shiftKey);
       else ropeAdd(e.clientX, e.clientY);
     }
+    else if (tool === 'lite') simplifyStamp(e.clientX, e.clientY);
     else if (tool === 'select') stamp(e.clientX, e.clientY);
   });
   const stop = () => {
@@ -3453,6 +3780,8 @@ export function initSculpt(opts) {
       paintMarks();
       if (info) info.textContent = `перо: сдвинуто ${penMoved} вершин, высота до ${depthMM.toFixed(2)} мм` +
         (invert ? ' (канавка)' : '');
+    } else if (tool === 'lite') {
+      liteFinish();
     } else if (tool === 'point') {
       ensureTopo(); nrm = null;
       if (ptSnap) { hist.push(ptSnap); if (hist.length > 15) hist.shift(); redo.length = 0; ptSnap = null; }
@@ -3841,6 +4170,7 @@ export function initSculpt(opts) {
     if (e.key === '[') { stepBrush(-0.5); e.preventDefault(); return; }
     if (e.key === ']') { stepBrush(0.5); e.preventDefault(); return; }
     if (e.key === '0') { deselect(); e.preventDefault(); }
+    if (e.key === '-' || e.key === '_') { setTool('lite'); e.preventDefault(); return; }
   });
   /* закрывать вкладку с несохранённой правкой без предупреждения нельзя */
   globalThis.addEventListener && globalThis.addEventListener('beforeunload', (e) => {
@@ -3943,6 +4273,11 @@ export function initSculpt(opts) {
       return { turn: pathTurn(rp.path), kink: pathKink(rp.path), len: pathLen(rp.path),
         points: rp.path.length, off: rp.off, radius: rp.radius };
     },
+    /** Точечное упрощение: стянуть рёбра короче T в шаре (c, R). */
+    simplifyAt: (c, R, T) => simplifyBall(c, R, T > 0 ? T : (2 * R) / 8, 4000),
+    simplifyFinish: () => { liteFinish(); return { vk, faces: liveIndex.length / 3 }; },
+    simplifyReset: () => { liteReset(); return liteFaces0; },
+    get tool() { return tool; },
     get ropeMoveMode() { return ropeMoveMode; },
     setRopeMoveMode(v) { ropeMoveMode = !!v; if (btnMove) { btnMove.classList.toggle('on', ropeMoveMode); btnMove.textContent = ropeMoveMode ? '■ Двигать' : '↔ Двигать'; } return ropeMoveMode; },
     setRopeQuality(q) { ropeQual = Math.max(1, Math.min(3, +q || 2)); if (ropeQEl) ropeQEl.value = String(ropeQual); syncRopeRow(); return ropeQual; },
