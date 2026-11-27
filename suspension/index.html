@@ -237,8 +237,22 @@
       <span class="val" id="sc-ropewv">2.5 мм</span>
     </div>
     <div class="presets">
+      <button class="btn" id="sc-rope-align" title="Убрать изломы от граней: сгладить путь и снова привязать к кузову">⌐ Выровнять</button>
+      <button class="btn" id="sc-rope-line" title="Поставить канат по прямой между концами">➖ По прямой</button>
+      <button class="btn" id="sc-rope-move" title="Тянуть канат по кузову мышью (Shift — приподнять/утопить)">↔ Двигать</button>
+      <button class="btn" id="sc-rope-reset" title="Вернуть канат к исходной линии">⟲ В исходное</button>
+    </div>
+    <div class="row">
+      <span class="tag" style="width:auto">Плотность</span>
+      <select id="sc-ropeq" class="inp" style="flex:1">
+        <option value="1">черновая — как борозда</option>
+        <option value="2" selected>точная — ровный канал</option>
+        <option value="3">максимум полигонов</option>
+      </select>
+    </div>
+    <div class="presets">
       <button class="btn" id="sc-burn" title="Раскалённый нож: прорезать в кузове канал ровно под форму каната">🔥 Прожечь</button>
-      <button class="btn" id="sc-rope-del" title="Убрать канат из сцены (кузов не меняется)">⌫ Убрать канат</button>
+      <button class="btn" id="sc-rope-del" title="Убрать канат из сцены (кузов не меняется)">⌫ Убрать</button>
       <button class="btn" id="sc-rope-save" title="Сохранить канат отдельным файлом 3MF">⬇ Канат</button>
     </div>
     <p class="hint" id="sc-ropeinfo">канатов нет — проведите канат по кузову</p>

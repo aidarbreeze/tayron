@@ -33,7 +33,7 @@ import {
   euclidFalloff,
   mirrorDeltas, checkMesh
 } from './meshops.js';
-import { pathLen, smoothPath, resamplePath, tubeArrays } from './ropes.js';
+import { pathLen, smoothPath, resamplePath, tubeArrays, smoothWindow, pathTurn, pathKink, relaxPath, straightPath } from './ropes.js';
 
 const MAXSTEPS = 60;    // итераций за одно нажатие при «Степень» 100 %
                         // (было 600: одно нажатие на 25 % утаскивало узел на 1.6 мм —
@@ -1381,7 +1381,7 @@ export function initSculpt(opts) {
      грани: так треугольники остаются ровными, а не превращаются в осколки.
      Ступенями: сначала широкая и грубая зона, потом узкая и мелкая — иначе на
      краю полосы остаются длинные «веера» из больших граней и кромка рвётся. */
-  function refineBand(pts, r, spacing, budget = 14000) {
+  function refineBand(pts, r, spacing, budget = 14000, opts = {}) {
     /* Первая ступень должна ДОТЯНУТЬСЯ до полосы: если сетка крупнее полосы
        (плита 8 мм, а желоб 1 мм), рёбра вообще не попадают в отбор, и борозда
        молча не делается. Поэтому грубая ступень шире местного ребра. */
@@ -1421,11 +1421,15 @@ export function initSculpt(opts) {
        Раньше ступени были шириной 3.2r — на изогнутой панели это дробило
        длинные рёбра в 7 мм от канала, и вместо канала получалась широкая
        мятая вмятина. */
+    /* Ступени — «воронка» от 3 шагов каната к каналу: если сгущение обрывается
+       у кромки, крупная грань соединяет узел в стенке канала с узлом в 4 мм от
+       него, и затенение рисует «лепестки» — самое заметное, что было в первом
+       варианте прожига. Теперь размер грани спадает плавно. */
     const stages = [
-      { r: Math.max(r * 1.9, eMax * 0.8), s: Math.max(spacing * 5, eMax / 2) },
-      { r: r * 1.7, s: Math.max(spacing * 3.5, eMax / 4) },
-      { r: r * 1.45, s: spacing * 2.5 },
-      { r: r * 1.25, s: spacing * 1.6 },
+      { r: r * 3.4, s: Math.max(spacing * 6, eMax / 2) },
+      { r: r * 2.7, s: Math.max(spacing * 4.5, eMax / 4) },
+      { r: r * 2.1, s: spacing * 3.5 },
+      { r: r * 1.55, s: spacing * 2.2 },
       { r: r * 1.05, s: spacing },
     ];
     let total = 0;
@@ -1433,6 +1437,13 @@ export function initSculpt(opts) {
     for (const st of stages) {
       if (total >= budget) break;
       total += bandPass(pts, st.r, st.s, budget - total, r, st.r + padE);
+    }
+    /* доп. проходы «до отказа»: полоса в канале должна стать ровной сеткой,
+       иначе вдавливание идёт по разным по длине граням и появляются заломы */
+    for (let e = 0; e < (opts.extraPass || 0) && total < budget; e++) {
+      const add = bandPass(pts, r * 1.02, spacing, budget - total, r, r * 1.02 + padE);
+      total += add;
+      if (!add) break;
     }
     return total;
   }
@@ -1461,6 +1472,7 @@ export function initSculpt(opts) {
       const keyOf = (a, b) => { const ca = canon[a], cb = canon[b]; return ca < cb ? ca * 1e6 + cb : cb * 1e6 + ca; };
       /* точки разрезов не должны совпадать с соседними — иначе нулевые рёбра */
       const cellC = 0.25;
+      const clashD = 0.08;
       const cGrid = new Map();
       const cKey = (p) => `${Math.round(p[0] / cellC)}|${Math.round(p[1] / cellC)}|${Math.round(p[2] / cellC)}`;
       const clashC = (p) => {
@@ -1468,7 +1480,7 @@ export function initSculpt(opts) {
         for (let d = -1; d <= 1; d++) for (let e = -1; e <= 1; e++) for (let f2 = -1; f2 <= 1; f2++) {
           const e2 = cGrid.get(`${cx + d}|${cy + e}|${cz + f2}`);
           if (!e2) continue;
-          for (const q of e2) if (Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 0.08) return true;
+          for (const q of e2) if (Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < clashD) return true;
         }
         return false;
       };
@@ -1498,14 +1510,18 @@ export function initSculpt(opts) {
               становится линией рёбер, а не рваной границей */
         if (rimA !== rimB) {
           if (len2 <= s2 * 4) return;                     // у кромки уже мелко
+          /* Кромку режем ПОСЕРЕДИНЕ ребра, а не в точке касания: бисекция
+             ставила точку на самую кромку, и там вырастала стена из тонких
+             «игл» — в затенении это выглядело как мятая бумага. */
           let lo = 0, hi = 1;
           for (let it = 0; it < 14; it++) {
             const m = (lo + hi) / 2;
             if (distToPath(pts, lerp3(A, B, m)) <= rr2) lo = m; else hi = m;
           }
           const cut = lerp3(A, B, (lo + hi) / 2);
+          const guard = 0.12;
           if (Math.min(Math.hypot(cut[0] - A[0], cut[1] - A[1], cut[2] - A[2]),
-                       Math.hypot(cut[0] - B[0], cut[1] - B[1], cut[2] - B[2])) < 0.12) return;
+                       Math.hypot(cut[0] - B[0], cut[1] - B[1], cut[2] - B[2])) < guard) return;
           if (clashC(cut)) return;
           takeC(cut); cuts.set(k, cut);
           return;
@@ -1523,12 +1539,37 @@ export function initSculpt(opts) {
         if (clashC(p)) return;
         takeC(p); cuts.set(k, p);
       };
+      /* Красное деление: грань, которая заметно крупнее шага, но задевает
+         полосу, делим ЦЕЛИКОМ (три середины), а не одно ребро. Иначе из грани
+         18×18 мм получался «лепесток» 18×0.5 мм — он и рисовал мятые тени
+         вокруг канала на крупной панели кузова. */
+      const cutMid = (ia, ib) => {
+        const k = keyOf(ia, ib);
+        if (cuts.has(k)) return;
+        const A = pt(ia), B = pt(ib);
+        const len2 = (B[0] - A[0]) ** 2 + (B[1] - A[1]) ** 2 + (B[2] - A[2]) ** 2;
+        if (len2 <= s2) return;
+        const p = lerp3(A, B, 0.5);
+        if (far(p) || clashC(p)) return;
+        takeC(p); cuts.set(k, p);
+      };
+      const bigFace = opts.red ? s2 * 36 : Infinity;              // сторона больше 6 шагов
       const nf0 = liveIndex.length / 3;
       for (let f = 0; f < nf0; f++) {
         const b3 = f * 3;
-        mark(liveIndex[b3], liveIndex[b3 + 1]);
-        mark(liveIndex[b3 + 1], liveIndex[b3 + 2]);
-        mark(liveIndex[b3 + 2], liveIndex[b3]);
+        const i0 = liveIndex[b3], i1 = liveIndex[b3 + 1], i2 = liveIndex[b3 + 2];
+        const A0 = pt(i0), A1 = pt(i1), A2 = pt(i2);
+        const e2 = (a, b) => (b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2 + (b[2] - a[2]) ** 2;
+        if (Math.max(e2(A0, A1), e2(A1, A2), e2(A2, A0)) > bigFace) {
+          const c = [(A0[0] + A1[0] + A2[0]) / 3, (A0[1] + A1[1] + A2[1]) / 3, (A0[2] + A1[2] + A2[2]) / 3];
+          if (distToPath(pts, c) <= (r * 1.8) * (r * 1.8)) {
+            cutMid(i0, i1); cutMid(i1, i2); cutMid(i2, i0);
+            continue;                             // этого прохода грани хватит
+          }
+        }
+        mark(i0, i1);
+        mark(i1, i2);
+        mark(i2, i0);
       }
       if (!cuts.size) break;
       /* бюджет: если рёбер больше, чем осталось, берём самые короткие ребра
@@ -1741,7 +1782,7 @@ export function initSculpt(opts) {
     const t0 = performance.now();
     /* 1) новые точки: густота по шагу, мелкому относительно ширины желоба */
     const sp = Math.max(0.16 * U, hw / (opts.spd || 3.5));   // шаг сгущения
-    const added = refineBand(path, hw, sp, opts.limit || 14000);
+    const added = refineBand(path, hw, sp, opts.limit || 14000, opts);
     ensureTopo();
     paintMarks();
     flush();
@@ -1764,6 +1805,7 @@ export function initSculpt(opts) {
     const nv = getNormals();
     const pn = path.nrms || null;      // нормали поверхности вдоль пути
     const pre = Float32Array.from(pos);
+    const pressed = [];
     let moved = 0, maxd = 0, skipped = 0;
     /* Отступ бокса — от полосы, а не «2 единицы»: при широком канале (канат
        ⌀5 мм) узлы у самой кромки оказывались за боксом и оставались на месте —
@@ -1816,6 +1858,7 @@ export function initSculpt(opts) {
       pos[o] += ex * s;
       pos[o + 1] += ey * s;
       pos[o + 2] += ez * s;
+      if (opts.snap) pressed.push({ v, s, ex, ey, ez });
       moved++; if (Math.abs(s) > maxd) maxd = Math.abs(s);
     }
     /* 2b) страховка от складок: если грань вывернулась или сжалась в иголку —
@@ -1864,6 +1907,21 @@ export function initSculpt(opts) {
         }
       }
     }
+    /* 3b) посадка глубины: каждый вдавленный узел ставится ровно на профиль
+       (s вдоль нормали пути от своего исходного места). Сетка после сгущения
+       неравномерная — без этой посадки дно канала «гуляет» на доли шага и
+       выглядит заломами. */
+    if (opts.snap && pressed.length) {
+      for (const q of pressed) {
+        const o = q.v * 3;
+        const meas = (pos[o] - pre[o]) * q.ex + (pos[o + 1] - pre[o + 1]) * q.ey +
+          (pos[o + 2] - pre[o + 2]) * q.ez;
+        const corr = q.s - meas;
+        if (corr === 0) continue;
+        pos[o] += q.ex * corr; pos[o + 1] += q.ey * corr; pos[o + 2] += q.ez * corr;
+      }
+    }
+
     /* 4) страховка: если какая-то грань всё же выродилась в ноль (площадь ~0),
        сдвигаем одну её вершину на 0.002 единицы вдоль нормали. Топология не
        меняется, вода-тайт не ломается, а нулевых граней в отчёте не остаётся. */
@@ -1949,6 +2007,9 @@ export function initSculpt(opts) {
   let ropeSel = -1;                       // выбранный канат
   let ropePts = null, ropeNrms = null;    // путь, который ведётся сейчас
   let ropePrev = null;                    // линия-превью под курсором
+  let ropeQual = 2;                       // 1 черновая / 2 точная / 3 максимум полигонов
+  let ropeMoveMode = false;               // «↔ Двигать»: тянуть канат по кузову
+  let ropeDrag = null;                    // { rp, hit0, path0, nrms0, off0, y0, dist }
   const ropeR = () => ropeWMM * U;
 
   /** нормаль поверхности в точке попадания — «верх» сечения каната */
@@ -2046,8 +2107,19 @@ export function initSculpt(opts) {
       return null;
     }
     const R = ropeR();
+    const step = Math.max(0.45 * R, 0.25 * U);
     const sm = smoothPath(pts, nrs, 2);                  // убираем дрожание луча
-    const rs = resamplePath(sm.pts, sm.nrms, Math.max(0.45 * R, 0.25 * U));
+    /* и сразу снимаем излом по граням: на крупной сетке штрих идёт по хордам,
+       и без этого канат выглядит «гранёным» ещё до «Выравнять».
+       Окно 1.6 радиуса — «мягко»: замысел пользователя не съедаем,
+       «⌐ Выровнять» потом может снять сильнее (окно 2 радиуса, 5 кругов) */
+    let cur0 = { pts: sm.pts, nrms: sm.nrms }, w0 = 1.6 * R;
+    for (let round = 0; round < 3; round++) {
+      const pr0 = smoothProject(cur0.pts, cur0.nrms, w0);
+      cur0 = resamplePath(pr0.pts, pr0.nrms, step);
+      w0 *= 0.8;
+    }
+    const rs = { pts: cur0.pts, nrms: cur0.nrms };
     const L = pathLen(rs.pts);
     if (L < 4 * R) {
       syncInfo(`канат короткий (${(L / U).toFixed(1)} мм при радиусе ${ropeWMM.toFixed(1)} мм) — протяните подлиннее`);
@@ -2089,7 +2161,8 @@ export function initSculpt(opts) {
     });
   }
   function newRope(pts, nrms, R) {
-    const rp = { name: `Канат ${++ropeSeq}`, path: pts, nrms, radius: R, off: R, mesh: null, tube: null, burn: null };
+    const rp = { name: `Канат ${++ropeSeq}`, path: pts, nrms, radius: R, off: R, mesh: null, tube: null, burn: null,
+      path0: pts.map(q => q.slice()), nrms0: nrms ? nrms.map(q => q.slice()) : null };
     rp.mesh = buildRopeMesh(rp);
     ropes.push(rp);
     ropeSel = ropes.length - 1;
@@ -2121,11 +2194,244 @@ export function initSculpt(opts) {
     const rp = ropes[ropeSel] || ropes[ropes.length - 1];
     const L = pathLen(rp.path);
     el.textContent = `канатов ${ropes.length} · «${rp.name}»: ${(L / U).toFixed(1)} мм, ` +
-      `⌀${(rp.radius * 2 / U).toFixed(1)} мм` +
+      `⌀${(rp.radius * 2 / U).toFixed(1)} мм · излом ${pathTurn(rp.path).toFixed(0)}°` +
+      ` (макс ${pathKink(rp.path).toFixed(0)}°)` +
       (rp.burn ? ` · канал ${(rp.burn.depth / U).toFixed(2)} мм` : ' · канал не прожжён');
   }
 
+  /* --- выравнивание и перемещение каната ---
+     Канат ложится по граням, и если грани крупные, путь получается изломанным
+     (по хордам граней). «Выровнять» сглаживает путь и снова привязывает его к
+     кузову, «По прямой» ставит его по хорде между концами, «Двигать» тянет
+     канат по поверхности мышью (Shift — приподнять/утопить). */
+
+  /** привязать точки пути обратно к граням: луч вдоль нормали поверхности */
+  /* Треугольники в окрестности пути: 110 тыс. граней кузова × сотни лучей —
+     это секунды, поэтому сначала отбираем полосу вокруг каната (десятки
+     миллисекунд), а лучи пускаем только по ней. */
+  function trisNear(pts, pad) {
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (const p of pts) {
+      if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+      if (p[2] < z0) z0 = p[2]; if (p[2] > z1) z1 = p[2];
+    }
+    x0 -= pad; y0 -= pad; z0 -= pad; x1 += pad; y1 += pad; z1 += pad;
+    const pos = mesh.geometry.attributes.position.array, idx = mesh.geometry.index.array;
+    const out = [];
+    const inBox = (i) => pos[i] >= x0 && pos[i] <= x1 && pos[i + 1] >= y0 && pos[i + 1] <= y1 && pos[i + 2] >= z0 && pos[i + 2] <= z1;
+    for (let f = 0; f < idx.length; f += 3) {
+      const a = idx[f] * 3, b = idx[f + 1] * 3, c = idx[f + 2] * 3;
+      if (!inBox(a) || !inBox(b) || !inBox(c)) continue;
+      out.push(pos[a], pos[a + 1], pos[a + 2], pos[b], pos[b + 1], pos[b + 2], pos[c], pos[c + 1], pos[c + 2]);
+    }
+    return Float64Array.from(out);
+  }
+
+  /* ближайшее попадание луча в набор треугольников (Мёллер–Трумберг) */
+  function rayTris(T, f0, f1, f2, d0, d1, d2, maxT) {
+    let best = -1;
+    for (let i = 0; i < T.length; i += 9) {
+      const ax = T[i], ay = T[i + 1], az = T[i + 2];
+      const e1x = T[i + 3] - ax, e1y = T[i + 4] - ay, e1z = T[i + 5] - az;
+      const e2x = T[i + 6] - ax, e2y = T[i + 7] - ay, e2z = T[i + 8] - az;
+      const px = d1 * e2z - d2 * e2y, py = d2 * e2x - d0 * e2z, pz = d0 * e2y - d1 * e2x;
+      const det = e1x * px + e1y * py + e1z * pz;
+      if (det > -1e-12 && det < 1e-12) continue;
+      const inv = 1 / det;
+      const tx = f0 - ax, ty = f1 - ay, tz = f2 - az;
+      const u = (tx * px + ty * py + tz * pz) * inv;
+      if (u < 0 || u > 1) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+      const v = (d0 * qx + d1 * qy + d2 * qz) * inv;
+      if (v < 0 || u + v > 1) continue;
+      const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+      if (t > 1e-6 && t < maxT && (best < 0 || t < best)) best = t;
+    }
+    return best;
+  }
+
+  function projectOnSurface(pts, nrms) {
+    const outP = [], outN = [];
+    if (!pts.length) return { pts: outP, nrms: outN };
+    const R = ropeR();
+    const reach = Math.max(6 * R, 3 * U);
+    const T = trisNear(pts, reach * 1.5);
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const n = (nrms && nrms[i]) ? nrms[i] : [0, 1, 0];
+      const l = Math.hypot(n[0], n[1], n[2]) || 1;
+      const nx = n[0] / l, ny = n[1] / l, nz = n[2] / l;
+      const from = [p[0] + nx * reach, p[1] + ny * reach, p[2] + nz * reach];
+      const t = rayTris(T, from[0], from[1], from[2], -nx, -ny, -nz, 2 * reach);
+      if (t < 0) { outP.push(p.slice()); outN.push(n.slice()); continue; }
+      outP.push([from[0] - nx * t, from[1] - ny * t, from[2] - nz * t]);
+      outN.push(n.slice());
+    }
+    return { pts: outP, nrms: outN };
+  }
+
+  /** выровнять выбранный канат: 'smooth' — сгладить изломы, 'line' — по прямой */
+  /* Проекция на грани со сглаживанием поправки: сначала путь сглаживается,
+     потом считается, куда его тянет поверхность, и эта поправка тоже
+     сглаживается. Так канат не «прилипает» к каждой грани (иначе на крупной
+     сетке он идёт по хордам и ломается), но и не уходит от кузова. */
+  function smoothProject(pts, nrms, halfW) {
+    const sm = smoothWindow(pts, nrms, halfW, 2);
+    const pr = projectOnSurface(sm.pts, sm.nrms);
+    const disp = pr.pts.map((q, i) => [q[0] - sm.pts[i][0], q[1] - sm.pts[i][1], q[2] - sm.pts[i][2]]);
+    const ds = smoothWindow(disp, null, Math.max(halfW * 0.7, U), 2);
+    return {
+      pts: sm.pts.map((p, i) => [p[0] + ds.pts[i][0], p[1] + ds.pts[i][1], p[2] + ds.pts[i][2]]),
+      nrms: pr.nrms
+    };
+  }
+
+  function ropeAlign(kind = 'smooth') {
+    const rp = ropes[ropeSel];
+    if (!rp) { syncInfo('каната нет — сначала проведите канат по кузову'); return null; }
+    const turn0 = pathTurn(rp.path), kink0 = pathKink(rp.path);
+    const step = Math.max(0.45 * rp.radius, 0.25 * U);
+    let pts, nrms;
+    if (kind === 'line') {
+      const st = straightPath(rp.path, rp.nrms, Math.max(8, Math.round(pathLen(rp.path) / step)));
+      pts = st.pts; nrms = st.nrms;
+    } else {
+      /* натянутая нить: круг «сгладить окном → привязать к граням → ровный
+         шаг», окно сужается; 5 кругов сходятся к ровной линии на кузове.
+         Окно задаётся в длине дуги (2 радиуса каната), а не числом итераций:
+         ступеньки граней короче, поэтому и снимаются именно они. */
+      let w = Math.max(2 * rp.radius, 3 * step);
+      let cur = { pts: rp.path, nrms: rp.nrms };
+      for (let round = 0; round < 5; round++) {
+        const pr = smoothProject(cur.pts, cur.nrms, w);
+        cur = resamplePath(pr.pts, pr.nrms, step);
+        w *= 0.72;
+      }
+      pts = cur.pts; nrms = cur.nrms;
+    }
+    const pr = projectOnSurface(pts, nrms);                  // и снова на грани кузова
+    const rs2 = resamplePath(pr.pts, pr.nrms, step);
+    rp.path = projectOnSurface(rs2.pts, rs2.nrms).pts;       // точно на гранях
+    rp.nrms = rs2.nrms || rp.nrms;
+    rebuildRope(rp);
+    syncRopeRow();
+    const turn1 = pathTurn(rp.path), kink1 = pathKink(rp.path);
+    syncInfo(`${kind === 'line' ? '➖ канат поставлен по прямой' : '⌐ канат выровнен'}: ` +
+      `излом ${turn0.toFixed(0)}° → ${turn1.toFixed(0)}°, макс. залом ${kink0.toFixed(0)}° → ${kink1.toFixed(0)}° · ` +
+      `длина ${(pathLen(rp.path) / U).toFixed(1)} мм, точек ${rp.path.length}`);
+    return { turn0, turn1, kink0, kink1, len: pathLen(rp.path), points: rp.path.length };
+  }
+
+  /** приподнять/утопить канат над поверхностью (off в единицах модели) */
+  function ropeLift(dOff) {
+    const rp = ropes[ropeSel];
+    if (!rp) return null;
+    rp.off = Math.max(0, Math.min(rp.radius * 3, rp.off + dOff));
+    rebuildRope(rp);
+    syncRopeRow();
+    return rp.off;
+  }
+
+  /** вернуть канат в исходный вид (как провели) */
+  function ropeReset() {
+    const rp = ropes[ropeSel];
+    if (!rp || !rp.path0) { syncInfo('вернуть нечего — канат уже как провели'); return null; }
+    rp.path = rp.path0.map(q => q.slice());
+    rp.nrms = rp.nrms0 ? rp.nrms0.map(q => q.slice()) : rp.nrms;
+    rp.off = rp.radius;
+    rebuildRope(rp);
+    syncRopeRow();
+    syncInfo(`канат «${rp.name}» возвращён к исходной линии (${(pathLen(rp.path) / U).toFixed(1)} мм)`);
+    return rp.path;
+  }
+
+  /* --- перемещение: тянем канат по поверхности --- */
+  function ropeMoveStart(clientX, clientY) {
+    const rp = ropes[ropeSel];
+    if (!rp) { syncInfo('каната нет — проведите его по кузову'); return false; }
+    const p = hitPoint(clientX, clientY);
+    if (!p) { syncInfo('нажмите на кузов рядом с канатом — и тяните'); return false; }
+    const w = mesh.localToWorld(new THREE.Vector3(p[0], p[1], p[2]));
+    const cp = camera.position;
+    const dist = Math.hypot(cp.x - w.x, cp.y - w.y, cp.z - w.z);   // без Vector3.distanceTo (стаб)
+    ropeDrag = {
+      rp, hit0: p, path0: rp.path.map(q => q.slice()), nrms0: rp.nrms.map(q => q.slice()),
+      off0: rp.off, y0: clientY, dist: Math.max(1, dist)
+    };
+    syncInfo(`канат «${rp.name}»: тяните по кузову (Shift — приподнять/утопить)`);
+    return true;
+  }
+  function ropeMoveAt(clientX, clientY, shift) {
+    const d = ropeDrag;
+    if (!d) return;
+    if (shift) {
+      /* Shift — по нормали: перевод пикселей в единицы модели по расстоянию до камеры */
+      const fovY = (camera.fov || 36) * Math.PI / 180;
+      const k = (2 * Math.tan(fovY / 2) / Math.max(1, innerHeight)) * d.dist;
+      d.rp.off = Math.max(0, Math.min(d.rp.radius * 3, d.off0 - (clientY - d.y0) * k));
+      rebuildRope(d.rp);
+      syncInfo(`канат «${d.rp.name}»: подъём ${(d.rp.off / U).toFixed(2)} мм над поверхностью`);
+      return;
+    }
+    const p = hitPoint(clientX, clientY);
+    if (!p) return;
+    const dx = p[0] - d.hit0[0], dy = p[1] - d.hit0[1], dz = p[2] - d.hit0[2];
+    const moved = d.path0.map((q, i) => [q[0] + dx, q[1] + dy, q[2] + dz]);
+    const pr = projectOnSurface(moved, d.nrms0);            // канат остаётся на гранях
+    d.rp.path = pr.pts;
+    d.rp.nrms = pr.nrms;
+    rebuildRope(d.rp);
+    syncInfo(`канат «${d.rp.name}»: сдвинут на ${(Math.hypot(dx, dy, dz) / U).toFixed(1)} мм ` +
+      `(длина ${(pathLen(d.rp.path) / U).toFixed(1)} мм)`);
+  }
+  function ropeMoveEnd() {
+    const d = ropeDrag;
+    ropeDrag = null;
+    if (!d) return null;
+    syncRopeRow();
+    syncInfo(`канат «${d.rp.name}» на новом месте: ${(pathLen(d.rp.path) / U).toFixed(1)} мм, ` +
+      `точек ${d.rp.path.length} · «🔥 Прожечь» режет канал по новой линии`);
+    return d.rp;
+  }
+
   /** 🔥 Раскалённый нож: канал в кузове ровно под форму каната, канат садится в него */
+  /* Сглаживание НОРМАЛЕЙ в полосе канала: геометрию не трогает, убирает
+     «мятую бумагу» в затенении на сгущённой сетке. */
+  function smoothNormalsNear(path, rad, iters = 6) {
+    const nAttr = geom.attributes.normal;
+    const idx = geom.index && geom.index.array;
+    if (!nAttr || !idx || !topo || !topo.rep) return 0;
+    const n = nAttr.array, rep = topo.rep;
+    const map = new Map();
+    for (let i = 0; i < idx.length; i += 3) {
+      const f0 = rep[idx[i]], f1 = rep[idx[i + 1]], f2 = rep[idx[i + 2]];
+      const add = (a, b) => { const l = map.get(a); if (l) l.push(b); else map.set(a, [b]); };
+      add(f0, f1); add(f1, f2); add(f2, f0); add(f1, f0); add(f2, f1); add(f0, f2);
+    }
+    const r2 = rad * rad;
+    const touch = [];
+    for (let v = 0; v < vk; v++) {
+      const o = v * 3;
+      if (distToPath(path, [pos[o], pos[o + 1], pos[o + 2]]) <= r2) touch.push(rep[v]);
+    }
+    if (!touch.length) return 0;
+    for (let it = 0; it < iters; it++) {
+      const upd = [];
+      for (const f of touch) {
+        const ns = map.get(f);
+        if (!ns || !ns.length) continue;
+        let x = n[f * 3] * 2, y = n[f * 3 + 1] * 2, z = n[f * 3 + 2] * 2, c = 2;
+        for (const g of ns) { x += n[g * 3]; y += n[g * 3 + 1]; z += n[g * 3 + 2]; c++; }
+        const l = Math.hypot(x, y, z) || 1;
+        upd.push([f, x / l, y / l, z / l]);
+      }
+      for (const [f, x, y, z] of upd) { n[f * 3] = x; n[f * 3 + 1] = y; n[f * 3 + 2] = z; }
+    }
+    nAttr.needsUpdate = true;
+    return touch.length;
+  }
+
   function burnRope(i = ropeSel) {
     const rp = ropes[i];
     if (!rp) { syncInfo('прожигать нечего: сначала проведите канат по кузову'); return null; }
@@ -2138,8 +2444,26 @@ export function initSculpt(opts) {
     const path = rp.path.slice();
     path.nrms = rp.nrms;                                  // всё сечение едет в одну сторону
     pushHist();                                           // отмена вернёт кузов, канат остаётся
-    const st = carvePath(path, hw, depth, { limit: 20000, ringIters: 3 });
+    /* «Плотность»: 1 — как борозда, 2 — точная, 3 — максимум полигонов.
+       Шаг сгущения = hw/spd, поэтому канал получается гладким: чем мельче
+       сетка в полосе, тем ровнее стенка и кромка. snap — после вдавливания
+       каждый узел канала ставится точно на аналитический профиль
+       (полуэллипс), из-за чего пропадают «заломы» от неровного шага сетки. */
+    /* extraPass оставлен выключенным: повторные проходы bandPass на тонкой
+       панели (коробка 3 мм, канат 0.6 мм) плодили вырожденные грани и дыры —
+       проверено стендом dbg_box. Плотность даёт шаг сгущения spd. */
+    const Q = { 1: { spd: 3.5, limit: 20000, snap: false, extra: 0 },
+                2: { spd: 5, limit: 80000, snap: true, extra: 0 },
+                3: { spd: 6.5, limit: 160000, snap: true, extra: 0 } }[ropeQual] ||
+              { spd: 5, limit: 80000, snap: true, extra: 0 };
+    const st = carvePath(path, hw, depth, {
+      limit: Q.limit, spd: Q.spd, ringIters: 3, snap: Q.snap, extraPass: Q.extra, red: true
+    });
     rp.off = 0;                                           // канат садится в канал
+    /* Сгущение полосы даёт много узких граней; их нормали «гуляют», и в
+       затенении канал выглядел мятой бумагой (геометрия при этом ровная —
+       проверено лучами по профилю). Сглаживаем нормали только у полосы. */
+    smoothNormalsNear(path, 4 * hw, 6);
     rebuildRope(rp);
     const L = pathLen(rp.path);
     const secs = (performance.now() - t0) / 1000;
@@ -3075,7 +3399,8 @@ export function initSculpt(opts) {
       makeBlock();
       shapeDrag(e.clientX, e.clientY, true);
     } else if (tool === 'rope') {
-      ropeStart(e.clientX, e.clientY);
+      if (ropeMoveMode && ropes[ropeSel]) ropeMoveStart(e.clientX, e.clientY);
+      else ropeStart(e.clientX, e.clientY);
     } else {
       const c0 = hitPoint(e.clientX, e.clientY);
       if (c0) computeFront(c0);
@@ -3105,7 +3430,10 @@ export function initSculpt(opts) {
         `глубина ${depthMM.toFixed(2)} мм — отпустите кнопку`);
     }
     else if (tool === 'shape') shapeDrag(e.clientX, e.clientY);
-    else if (tool === 'rope') ropeAdd(e.clientX, e.clientY);
+    else if (tool === 'rope') {
+      if (ropeDrag) ropeMoveAt(e.clientX, e.clientY, e.shiftKey);
+      else ropeAdd(e.clientX, e.clientY);
+    }
     else if (tool === 'select') stamp(e.clientX, e.clientY);
   });
   const stop = () => {
@@ -3154,6 +3482,12 @@ export function initSculpt(opts) {
       } else syncInfo('борозда не сделана: отпустите кнопку на кузове');
       return;
     }
+    if (tool === 'rope' && ropeDrag) {
+      ropeMoveAt(e.clientX, e.clientY, e.shiftKey);
+      ropeMoveEnd();
+      painting = false;
+      return;
+    }
     if (tool === 'rope' && ropePts) {
       ropeAdd(e.clientX, e.clientY);
       painting = false;
@@ -3193,6 +3527,27 @@ export function initSculpt(opts) {
     ropeW.value = String(ropeWMM);
     showW();
     ropeW.addEventListener('input', showW);
+  }
+  const btnAlign = $('sc-rope-align');
+  if (btnAlign) btnAlign.addEventListener('click', () => ropeAlign('smooth'));
+  const btnLine = $('sc-rope-line');
+  if (btnLine) btnLine.addEventListener('click', () => ropeAlign('line'));
+  const btnMove = $('sc-rope-move');
+  if (btnMove) btnMove.addEventListener('click', () => {
+    ropeMoveMode = !ropeMoveMode;
+    btnMove.classList.toggle('on', ropeMoveMode);
+    btnMove.textContent = ropeMoveMode ? '■ Двигать' : '↔ Двигать';
+    syncInfo(ropeMoveMode
+      ? 'канат: тяните по кузову мышью — он останется на гранях (Shift — приподнять/утопить)'
+      : 'канат: снова прокладывается линией по кузову');
+  });
+  const btnReset = $('sc-rope-reset');
+  if (btnReset) btnReset.addEventListener('click', () => ropeReset());
+  const ropeQEl = $('sc-ropeq');
+  if (ropeQEl) {
+    const showQ = () => { ropeQual = Math.max(1, Math.min(3, +ropeQEl.value || 2)); syncRopeRow(); };
+    showQ();
+    ropeQEl.addEventListener('change', showQ);
   }
   const btnBurn = $('sc-burn');
   if (btnBurn) btnBurn.addEventListener('click', () => burnRope());
@@ -3579,6 +3934,19 @@ export function initSculpt(opts) {
       return newRope(rs.pts, rs.nrms, R);
     },
     burnRope: (i = ropeSel) => burnRope(i),
+    ropeAlign: (kind) => ropeAlign(kind),
+    ropeLift: (d) => ropeLift(d),
+    ropeReset: () => ropeReset(),
+    ropeHealth: (i = ropeSel) => {
+      const rp = ropes[i];
+      if (!rp) return null;
+      return { turn: pathTurn(rp.path), kink: pathKink(rp.path), len: pathLen(rp.path),
+        points: rp.path.length, off: rp.off, radius: rp.radius };
+    },
+    get ropeMoveMode() { return ropeMoveMode; },
+    setRopeMoveMode(v) { ropeMoveMode = !!v; if (btnMove) { btnMove.classList.toggle('on', ropeMoveMode); btnMove.textContent = ropeMoveMode ? '■ Двигать' : '↔ Двигать'; } return ropeMoveMode; },
+    setRopeQuality(q) { ropeQual = Math.max(1, Math.min(3, +q || 2)); if (ropeQEl) ropeQEl.value = String(ropeQual); syncRopeRow(); return ropeQual; },
+    get ropeQuality() { return ropeQual; },
     removeRope: (i = ropeSel) => removeRope(i),
     saveRope: (kind) => saveRope(kind),
     setRopeThickness(mm) {

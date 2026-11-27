@@ -163,3 +163,92 @@ export function tubeStats(t) {
   return { verts: t.verts, rings: t.rings, sides: t.sides, tris: t.index.length / 3,
     size: [x1 - x0, y1 - y0, z1 - z0], min: [x0, y0, z0], max: [x1, y1, z1] };
 }
+
+/** излом пути: сумма углов между соседними отрезками, градусы (0 — прямая) */
+export function pathTurn(pts) {
+  let sum = 0;
+  for (let i = 1; i + 1 < pts.length; i++) {
+    const a = sub(pts[i], pts[i - 1]), b = sub(pts[i + 1], pts[i]);
+    const la = Math.hypot(a[0], a[1], a[2]), lb = Math.hypot(b[0], b[1], b[2]);
+    if (la < 1e-9 || lb < 1e-9) continue;
+    const c = Math.max(-1, Math.min(1, dot(a, b) / (la * lb)));
+    sum += Math.acos(c) * 180 / Math.PI;
+  }
+  return sum;
+}
+
+/** максимальный излом на одном узле, градусы */
+export function pathKink(pts) {
+  let mx = 0;
+  for (let i = 1; i + 1 < pts.length; i++) {
+    const a = sub(pts[i], pts[i - 1]), b = sub(pts[i + 1], pts[i]);
+    const la = Math.hypot(a[0], a[1], a[2]), lb = Math.hypot(b[0], b[1], b[2]);
+    if (la < 1e-9 || lb < 1e-9) continue;
+    const c = Math.max(-1, Math.min(1, dot(a, b) / (la * lb)));
+    mx = Math.max(mx, Math.acos(c) * 180 / Math.PI);
+  }
+  return mx;
+}
+
+/** выровнять путь: лапласово сглаживание, концы на месте (k — доля шага) */
+export function relaxPath(pts, nrms, iters = 10, k = 0.5) {
+  let p = pts.map(q => q.slice());
+  let n = nrms ? nrms.map(q => q.slice()) : null;
+  const m = p.length;
+  if (m < 3) return { pts: p, nrms: n };
+  for (let it = 0; it < iters; it++) {
+    const q = p.map((v, i) => (i === 0 || i === m - 1) ? v
+      : [v[0] + k * ((p[i - 1][0] + p[i + 1][0]) / 2 - v[0]),
+         v[1] + k * ((p[i - 1][1] + p[i + 1][1]) / 2 - v[1]),
+         v[2] + k * ((p[i - 1][2] + p[i + 1][2]) / 2 - v[2])]);
+    p = q;
+    if (n) n = n.map((v, i) => (i === 0 || i === n.length - 1) ? v
+      : norm([n[i - 1][0] + n[i + 1][0], n[i - 1][1] + n[i + 1][1], n[i - 1][2] + n[i + 1][2]]));
+  }
+  return { pts: p, nrms: n };
+}
+
+/** поставить путь по прямой между концами (точки равномерно, нормали — по концам) */
+/** Скользящее среднее по длине дуги: убирает всё короче окна ±halfW.
+    Концы остаются на месте — канат не «съедается» по краям. */
+export function smoothWindow(pts, nrms, halfW, passes = 2) {
+  const n = pts.length;
+  if (n < 3 || !(halfW > 0)) return { pts: pts.map(p => p.slice()), nrms: (nrms || []).map(v => v.slice()) };
+  const s = [0];
+  for (let i = 1; i < n; i++) {
+    const a = pts[i - 1], b = pts[i];
+    s.push(s[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]));
+  }
+  let cur = pts.map(p => p.slice());
+  for (let pass = 0; pass < passes; pass++) {
+    const next = cur.map(p => p.slice());
+    let lo = 0, hi = 0;
+    for (let i = 0; i < n; i++) {
+      while (lo < i && s[i] - s[lo] > halfW) lo++;
+      if (hi < i) hi = i;
+      while (hi + 1 < n && s[hi + 1] - s[i] <= halfW) hi++;
+      let ax = 0, ay = 0, az = 0, c = 0;
+      for (let j = lo; j <= hi; j++) { ax += cur[j][0]; ay += cur[j][1]; az += cur[j][2]; c++; }
+      next[i] = [ax / c, ay / c, az / c];
+    }
+    next[0] = cur[0].slice(); next[n - 1] = cur[n - 1].slice();
+    cur = next;
+  }
+  return { pts: cur, nrms: (nrms || []).map(v => v.slice()) };
+}
+
+export function straightPath(pts, nrms, count = 0) {
+  const m = pts.length;
+  const A = pts[0], B = pts[m - 1];
+  const n = count > 1 ? count : Math.max(2, m);
+  const out = [], outN = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    out.push([A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t, A[2] + (B[2] - A[2]) * t]);
+    if (nrms) {
+      const NA = nrms[0], NB = nrms[m - 1];
+      outN.push(norm([NA[0] + (NB[0] - NA[0]) * t, NA[1] + (NB[1] - NA[1]) * t, NA[2] + (NB[2] - NA[2]) * t]));
+    }
+  }
+  return { pts: out, nrms: nrms ? outN : null };
+}
