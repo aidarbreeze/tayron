@@ -3845,6 +3845,7 @@ export function initSculpt(opts) {
   if (btnRect) btnRect.addEventListener('click', () => setTool('rect'));
   if (btnGroove) btnGroove.addEventListener('click', () => setTool('groove'));
   if (btnRope) btnRope.addEventListener('click', () => setTool('rope'));
+  if (btnLite) btnLite.addEventListener('click', () => setTool('lite'));
   if (ropeW) {
     const ropeWv = $('sc-ropewv');
     const showW = () => {
