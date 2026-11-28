@@ -260,20 +260,23 @@ reset();
     `«${rp && rp.name}», длина ${rp ? (rp.len / U).toFixed(1) : 0} мм, ⌀${rp ? (2 * rp.radius / U).toFixed(1) : 0} мм, граней кузова ${sculpt.stats().faces}`);
 }
 
-/* ---------- 15. прожиг канала ---------- */
+/* ---------- 15. прожиг: канат встраивается в кузов ---------- */
 {
+  reset(); tool('rope');
+  strokeSurface(170, 160, 390, 160, 30);      // ровное поле кузова
   const before = snap();
+  const fB = I().length / 3;
   const t0 = Date.now();
   const burn = sculpt.burnRope();
   const ms = Date.now() - t0;
-  let depth = 0;
-  for (let i = 0; i < before.length; i += 3) {
-    const d = Math.hypot(P()[i] - before[i], P()[i + 1] - before[i + 1], P()[i + 2] - before[i + 2]);
-    if (d > depth) depth = d;
-  }
+  const skinMove = maxDiff(before, P());
+  const fN = I().length / 3;
   const c = chk();
-  it('15. прожиг канала: глубина и целая сетка', depth / U > 1 && c.openEdges === 0 && c.nonManifold === 0,
-    `глубина ${(depth / U).toFixed(2)} мм, +${burn && burn.added} точек, дыр ${c.openEdges}, неманиф ${c.nonManifold}, ${ms} мс`);
+  it('15. прожиг: кожа не сдвинута, грани канала встали, сетка цела',
+    !!burn && burn.mode === 'cut' && skinMove === 0 && fN > fB
+      && c.openEdges === 0 && c.nonManifold === 0 && c.watertight,
+    `−${burn && burn.removed} граней кожи, +${fN - fB + (burn ? burn.removed : 0)} граней канала, `
+    + `сдвиг кожи ${skinMove}, дыр ${c.openEdges}, неманиф ${c.nonManifold}, ${ms} мс`);
 }
 
 /* ---------- 16. «Упростить» ---------- */

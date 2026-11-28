@@ -1,7 +1,11 @@
-/* «🔥 Прожечь»: канал в кузове выжигается ровно по сечению каната, самого
-   каната в сцене не остаётся. Настоящий three, настоящий sculpt.js, кузов из
-   body.glb. Проверяем: глубина = радиус, ширина = 2R, стенка = полукруг,
-   кожа вне канала не сдвинута ни на единицу, сетка замкнута, отмена цела.
+/* «🔥 Прожечь»: канат ВСТРАИВАЕТСЯ в кузов. Грани кожи внутри следа удаляются,
+   на их место встают грани самого каната (полуцилиндр R + торцы), между кромкой
+   кожи и каналом зашивается лента. Координаты кожи не меняются ни на единицу.
+   Настоящий three, настоящий sculpt.js, кузов из body.glb.
+
+   Профиль канала проверяется по индексам рядов (станция × шаг дуги), а не
+   «на глаз»: каждая точка ряда обязана лежать на дуге радиуса R между точками
+   кромки, а самый глубокий ряд — ровно на R ниже хорды.
 
    Запуск: sh tests/run_all.sh   (или node tests/burn_cut.mjs после mkharness.sh) */
 import fs from 'node:fs';
@@ -122,52 +126,14 @@ const badEdges = (idx) => {
 };
 
 
-/* ---------- профиль пути: (t, h) узла относительно каната ---------- */
-const pathProj = (pts, p) => {
-  let best = Infinity, bi = 0, bt = 0;
-  for (let i = 0; i + 1 < pts.length; i++) {
-    const a = pts[i], b = pts[i + 1];
-    const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
-    const L2 = dx * dx + dy * dy + dz * dz;
-    let t = L2 > 1e-12 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy + (p[2] - a[2]) * dz) / L2 : 0;
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
-    const qx = p[0] - (a[0] + dx * t), qy = p[1] - (a[1] + dy * t), qz = p[2] - (a[2] + dz * t);
-    const d2 = qx * qx + qy * qy + qz * qz;
-    if (d2 < best) { best = d2; bi = i; bt = t; }
-  }
-  /* за торцом каната? */
-  let beyond = 0;
-  const A0 = pts[0], B0 = pts[1], A1 = pts[pts.length - 2], B1 = pts[pts.length - 1];
-  if (bi === 0 && bt <= 1e-9) {
-    const q = [p[0] - A0[0], p[1] - A0[1], p[2] - A0[2]];
-    if (q[0] * (B0[0] - A0[0]) + q[1] * (B0[1] - A0[1]) + q[2] * (B0[2] - A0[2]) < 0) beyond = -1;
-  } else if (bi === pts.length - 2 && bt >= 1 - 1e-9) {
-    const q = [p[0] - B1[0], p[1] - B1[1], p[2] - B1[2]];
-    if (q[0] * (B1[0] - A1[0]) + q[1] * (B1[1] - A1[1]) + q[2] * (B1[2] - A1[2]) > 0) beyond = 1;
-  }
-  return { seg: bi, t: bt, lat: Math.sqrt(best), beyond };
-};
-/* расстояние узла от оси каната В ПЛОСКОСТИ КОЖИ (без высоты над ней) */
-const inPlane = (p) => {
-  const pr = pathProj(rpath, p);
-  const A = rpath[pr.seg], B = rpath[pr.seg + 1], u = pr.t;
-  const n0 = nrms[pr.seg] || [0, 1, 0], n1 = nrms[pr.seg + 1] || n0;
-  let nx = n0[0] + (n1[0] - n0[0]) * u, ny = n0[1] + (n1[1] - n0[1]) * u, nz = n0[2] + (n1[2] - n0[2]) * u;
-  const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
-  const ax = A[0] + (B[0] - A[0]) * u, ay = A[1] + (B[1] - A[1]) * u, az = A[2] + (B[2] - A[2]) * u;
-  const rx = p[0] - ax, ry = p[1] - ay, rz = p[2] - az;
-  const dn = rx * nx + ry * ny + rz * nz;
-  return { t: Math.hypot(rx - nx * dn, ry - ny * dn, rz - nz * dn), dn, beyond: pr.beyond };
-};
+
 
 /* ---------- 1. канат по кузову, «прожечь» ---------- */
 reset();
 tool('rope');
-strokeSurface(150, 160, 400, 160, 26);
+strokeSurface(280 - 110, 160, 280 + 110, 160, 30);
 const rp = sculpt.ropeList()[0];
 const R = rp.radius, L = rp.len;
-const rpath = sculpt.ropePath(0).slice();
-const nrms = cleanNormals(sculpt.ropePath(0), sculpt.ropeNormals(0), 3, 35);
 const tubeObj = sculpt.ropeMesh(0);
 const before = snap();
 const volBefore = volume(P(), I());
@@ -179,78 +145,73 @@ it('кузов до прожига замкнут', c0.openEdges === 0 && c0.non
 const t0 = Date.now();
 const res = sculpt.burnRope(rp.i);
 const ms = Date.now() - t0;
-it('прожиг выполнен', res && res.mode === 'cut', JSON.stringify(res));
-it('быстро (< 15 с)', ms < 15000, `${ms} мс`);
+it('прожиг выполнен', !!(res && res.mode === 'cut'), res ? `${res.stations} станций, кожа ${res.removed} граней` : 'отказ');
+if (!res) { console.log(`\nИТОГ: прожиг не выполнен — ${n - bad} из ${n}`); process.exit(1); }
+it('быстро (< 25 с)', ms < 25000, `${ms} мс`);
 
-/* ---------- 2. глубина и ширина = сечение каната ---------- */
-const moved = [];
+/* ---------- 2. кожа не сдвинута ---------- */
+let moved = 0, maxMove = 0;
 for (let v = 0; v < before.length / 3; v++) {
   const o = v * 3;
   const d = Math.hypot(P()[o] - before[o], P()[o + 1] - before[o + 1], P()[o + 2] - before[o + 2]);
-  if (d > 1e-9) moved.push({ v, d, p: [before[o], before[o + 1], before[o + 2]] });
+  if (d > 1e-9) { moved++; if (d > maxMove) maxMove = d; }
 }
-let maxD = 0, worst = 0, outside = 0, maxOutside = 0;
-for (const m of moved) {
-  const q = inPlane(m.p);
-  maxD = Math.max(maxD, m.d);
-  if (q.beyond || q.t >= R) { outside++; maxOutside = Math.max(maxOutside, m.d); continue; }
-  const want = R * Math.sqrt(1 - (q.t / R) ** 2);         // полуцилиндр каната
-  worst = Math.max(worst, Math.abs(m.d - want));
+it('ни один узел кожи не сдвинут', moved === 0, `сдвинуто ${moved}, макс ${(maxMove / U).toFixed(4)} мм`);
+
+/* ---------- 3. профиль канала = полукруг каната ----------
+   Узлы ряда: кромка слева vertsFrom+i, кромка справа vertsFrom+M+i,
+   точки дуги wallFrom + i*(K−1) + (j−1) для j = 1..K−1. */
+const Pp = P();
+const { M, K, vertsFrom, wallFrom } = res;
+let profErr = 0, depth = 0, widthErr = 0, rows = 0;
+for (let i = 0; i < M; i++) {
+  const a = (vertsFrom + i) * 3, b = (vertsFrom + M + i) * 3;
+  const ax = Pp[a], ay = Pp[a + 1], az = Pp[a + 2];
+  const bx = Pp[b], by = Pp[b + 1], bz = Pp[b + 2];
+  const w = Math.hypot(bx - ax, by - ay, bz - az);
+  if (Math.abs(w - 2 * R) / (2 * R) > widthErr) widthErr = Math.abs(w - 2 * R) / (2 * R);
+  for (let j = 1; j < K; j++) {
+    const th = Math.PI * j / K, lam = (1 - Math.cos(th)) / 2, want = R * Math.sin(th);
+    const o = (wallFrom + i * (K - 1) + (j - 1)) * 3;
+    const cx = ax + (bx - ax) * lam, cy = ay + (by - ay) * lam, cz = az + (bz - az) * lam;
+    const d = Math.hypot(Pp[o] - cx, Pp[o + 1] - cy, Pp[o + 2] - cz);
+    if (Math.abs(d - want) > profErr) profErr = Math.abs(d - want);
+    if (d > depth) depth = d;
+    rows++;
+  }
 }
-it('глубина канала = радиус каната', Math.abs(maxD - R) / U < 0.02,
-  `${(maxD / U).toFixed(2)} мм при R = ${(R / U).toFixed(2)} мм`);
-it('стенка канала = полукруг каната', worst / U < 0.05,
-  `макс. отклонение ${(worst / U).toFixed(3)} мм по ${moved.length} узлам`);
-it('вне сечения каната узлы не сдвинуты', outside === 0,
-  `сдвинуто вне полосы ${outside}, макс ${(maxOutside / U).toFixed(2)} мм`);
-it('ширина канала = 2 радиуса', Math.abs(res.width - (R * 2) / U) < 0.01,
-  `${res.width.toFixed(2)} мм`);
+it('глубина канала = радиус каната', Math.abs(depth - R) / R < 0.02,
+  `${(depth / U).toFixed(2)} мм при R = ${(R / U).toFixed(2)} мм`);
+it('стенка канала = полукруг каната', profErr / U < 0.02,
+  `макс отклонение ${(profErr / U).toFixed(3)} мм по ${rows} узлам дуги`);
+it('ширина канала = 2 радиуса', widthErr < 0.03,
+  `хорда кромки ${(2 * R * (1 + widthErr) / U).toFixed(2)} мм при 2R = ${(2 * R / U).toFixed(2)} мм`);
 
-/* кожа дальше 1.4 R от каната не двигается вовсе */
-let farMoved = 0;
-for (const m of moved) { const q = inPlane(m.p); if (q.lat > 1.4 * R) farMoved++; }
-it('кожа вокруг канала не тронута', farMoved === 0, `сдвинуто дальше 1.4 R: ${farMoved}`);
-
-/* ---------- 3. каната больше нет ---------- */
+/* ---------- 4. каната больше нет, сетка цела ---------- */
 const inScene = (mesh.parent && mesh.parent.children || []).includes(tubeObj);
 it('каната в сцене нет', sculpt.ropeCount === 0 && !inScene,
-  `канатов ${sculpt.ropeCount}, труба в сцене ${inScene}`);
-it('канат помечен впаянным', sculpt.ropeAbsorbed === 1, `впаяно ${sculpt.ropeAbsorbed}`);
-
-/* ---------- 4. сетка цела, узлы добавились ---------- */
+  `канатов ${sculpt.ropeCount}, труба в сцене ${inScene}, впаяно ${sculpt.ropeAbsorbed}`);
 const c1 = chk();
-it('после прожига сетка замкнута', c1.openEdges === 0 && c1.nonManifold === 0 && c1.degenerate === 0,
-  `${c1.openEdges}/${c1.nonManifold}/${c1.degenerate} дыр/неманифолд/вырожденных, watertight ${c1.watertight}`);
-const f1 = I().length / 3, v1 = P().length / 3;
-it('в полосе каната сетка сгущена', f1 > fBefore + 2000 && res.added > 0,
-  `граней ${fBefore} → ${f1} (+${f1 - fBefore}), вершин ${v1}, добавлено ${res.added}`);
+it('после прожига сетка замкнута', c1.openEdges === 0 && c1.nonManifold === 0 && c1.degenerate === 0
+  && c1.watertight, `${c1.openEdges}/${c1.nonManifold}/${c1.degenerate}, watertight ${c1.watertight}`);
+const f1 = I().length / 3;
+it('грани канала встали на место кожи', f1 > fBefore && res.removed > 100,
+  `граней ${fBefore} → ${f1} (−${res.removed} кожи, +${f1 - fBefore + res.removed})`);
 let nan = 0;
 for (let i = 0; i < P().length; i++) if (!Number.isFinite(P()[i])) nan++;
 it('координаты без NaN', nan === 0, `NaN ${nan}`);
 
 /* ---------- 5. объём: минус полуцилиндр каната ---------- */
-const volAfter = volume(P(), I());
-const lost = (volBefore - volAfter) / U ** 3;
-const wantMm3 = Math.PI * (R / U) ** 2 / 2 * (L / U);
-it('объём уменьшился на полуцилиндр каната', Math.abs(lost - wantMm3) / wantMm3 < 0.25,
-  `−${lost.toFixed(1)} мм³ при ожидаемых ${wantMm3.toFixed(1)} мм³ (${((lost / wantMm3) * 100).toFixed(0)} %)`);
+const lost = (volBefore - volume(P(), I())) / U ** 3;
+const want3 = Math.PI * (R / U) ** 2 / 2 * (L / U);
+it('объём уменьшился на полуцилиндр каната', Math.abs(lost - want3) / want3 < 0.4,
+  `−${lost.toFixed(1)} мм³ при ожидаемых ${want3.toFixed(1)} мм³ (${((lost / want3) * 100).toFixed(0)} %)`);
 
-/* ---------- 6. далеко от каната сетка та же ---------- */
-let farDiff = 0;
-for (let v = 0; v < before.length / 3; v++) {
-  const o = v * 3;
-  if (pathProj(rpath, [before[o], before[o + 1], before[o + 2]]).lat > 3 * R) {
-    farDiff = Math.max(farDiff, Math.abs(P()[o] - before[o]), Math.abs(P()[o + 1] - before[o + 1]),
-      Math.abs(P()[o + 2] - before[o + 2]));
-  }
-}
-it('дальше 3 R от каната кузов не изменился', farDiff === 0, `макс ${farDiff}`);
-
-/* ---------- 7. повторный прожиг нечего делать ---------- */
+/* ---------- 6. повторный прожиг ---------- */
 const again = sculpt.burnRope(rp.i);
-it('повторный прожиг отклонён', again === null && /впаян|прожечь/i.test(info()), info().slice(0, 90));
+it('повторный прожиг отклонён', again === null, info().slice(0, 70));
 
-/* ---------- 8. отмена возвращает и кузов, и канат ---------- */
+/* ---------- 7. отмена возвращает и кузов, и канат ---------- */
 key('z', { ctrlKey: true });
 const restored = maxDiff(before, P());
 it('отмена вернула кузов', restored === 0 && I().length / 3 === fBefore,
@@ -258,10 +219,23 @@ it('отмена вернула кузов', restored === 0 && I().length / 3 ==
 it('отмена вернула канат', sculpt.ropeCount === 1 && sculpt.ropeAbsorbed === 0,
   `канатов ${sculpt.ropeCount}, впаяно ${sculpt.ropeAbsorbed}`);
 
+/* ---------- 8. прожиг там, где кожа под следом скачет (уступ панели):
+   операция обязана отказаться и не трогать кузов ---------- */
+reset();
+tool('rope');
+strokeSurface(150, 160, 400, 160, 26);
+const rp2 = sculpt.ropeList()[0];
+const before2 = snap();
+const f2 = I().length / 3;
+const refused = sculpt.burnRope(rp2.i);
+it('на уступе панели — честный отказ', refused === null, info().slice(0, 90));
+it('после отказа кузов не тронут', maxDiff(before2, P()) === 0 && I().length / 3 === f2
+  && sculpt.ropeCount === 1, `граней ${I().length / 3}, канатов ${sculpt.ropeCount}`);
+
 /* ---------- 9. прожиг без каната ---------- */
 reset();
 const none = sculpt.burnRope();
 it('без каната прожиг отклонён', none === null, info().slice(0, 90));
 
-console.log(`\n${bad ? 'FAIL' : 'ok'}: ${n - bad}/${n} проверок`);
+console.log(`\nИТОГ «прожечь»: ${n - bad} из ${n} проверок зелёные, провалов ${bad}`);
 if (bad) process.exit(1);

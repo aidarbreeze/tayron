@@ -1624,50 +1624,6 @@ export function initSculpt(opts) {
     }
     return { lat: Math.sqrt(best), s, beyond, seg: bestSeg, t: bestT };
   }
-  /* «Прожечь»: поставить стенку канала ровно на сечение каната.
-     Полуцилиндр: h(t) = −R·√(1−(t/R)²) при |t| ≤ R и 0 дальше. Узел сохраняет
-     своё место вдоль кожи и в стороне (тангенциальная часть не меняется),
-     меняется только высота над плоскостью кожи. Поэтому стенка в точности
-     повторяет полуцилиндр каната, а за пределами полосы кожа возвращается
-     туда, где была, — никакого «продавливания» пояска вокруг канала. */
-  function snapChannel(path, R, nrms) {
-    const g = mesh.geometry;
-    const pos = g.attributes.position.array;
-    const nrm = g.attributes.normal.array;
-    const reach = R * 1.25;
-    let moved = 0, maxd = 0;
-    for (let v = 0; v < pos.length / 3; v++) {
-      const o = v * 3;
-      const p = [pos[o], pos[o + 1], pos[o + 2]];
-      const pr = pathProj(path, p);
-      if (pr.beyond || pr.lat > reach) continue;
-      const A = path[pr.seg], B = path[pr.seg + 1], u = pr.t;
-      const n0 = nrms[pr.seg] || [0, 1, 0], n1 = nrms[pr.seg + 1] || n0;
-      let nx = n0[0] + (n1[0] - n0[0]) * u;
-      let ny = n0[1] + (n1[1] - n0[1]) * u;
-      let nz = n0[2] + (n1[2] - n0[2]) * u;
-      const nl = Math.hypot(nx, ny, nz) || 1;
-      nx /= nl; ny /= nl; nz /= nl;
-      /* только та сторона кожи, куда смотрит канат: соседние слои панели
-         (стекло, уплотнитель) не должны попасть в канал */
-      if (nrm[o] * nx + nrm[o + 1] * ny + nrm[o + 2] * nz < 0.2) continue;
-      const ax = A[0] + (B[0] - A[0]) * u;
-      const ay = A[1] + (B[1] - A[1]) * u;
-      const az = A[2] + (B[2] - A[2]) * u;
-      const rel = [p[0] - ax, p[1] - ay, p[2] - az];
-      const dn = rel[0] * nx + rel[1] * ny + rel[2] * nz;
-      const ix = rel[0] - nx * dn, iy = rel[1] - ny * dn, iz = rel[2] - nz * dn;
-      const t = Math.hypot(ix, iy, iz);
-      if (t >= R) continue;                    // вне сечения каната — не трогаем
-      const h = -R * Math.sqrt(1 - (t / R) * (t / R));
-      pos[o] += nx * h; pos[o + 1] += ny * h; pos[o + 2] += nz * h;
-      moved++;
-      if (-h > maxd) maxd = -h;
-    }
-    g.attributes.position.needsUpdate = true;
-    g.computeVertexNormals();
-    return { moved, maxd };
-  }
   /* Длина пути в единицах модели */
   function pathLen(pts) {
     let L = 0;
@@ -2826,37 +2782,599 @@ export function initSculpt(opts) {
     if (rp.absorbed) { syncInfo(`канат «${rp.name}» уже впаян — прожигать нечего`); return null; }
     const t0 = performance.now();
     const R = rp.radius;
-    const path = rp.path.slice();
-    path.nrms = opts.rawNormals ? rp.nrms : cleanNormals(rp.path, rp.nrms, opts.win || 3, opts.deg || 35);
-    pushHist();                       // отмена вернёт и кузов, и канат
-    /* «🔥 Прожечь»: канал ровно по сечению каната — полукруг радиуса R.
-       Сначала сгущение полосы (carvePath с depth 0, поясок не разглаживается:
-       ringIters -1), потом стенка по аналитическому полукругу (snapChannel).
-       Глубина = радиус, полуширина = радиус, кожа вне полосы не двигается. */
-    const Q = { 1: { spd: 4, limit: 30000 }, 2: { spd: 6, limit: 90000 },
-                3: { spd: 8, limit: 180000 } }[ropeQual] || { spd: 6, limit: 90000 };
-    /* 1) сгустить сетку вдоль каната (без смещения), 2) вырезать канал точно
-       по сечению: каждый узел полосы |t| < R опускается на h(t) полукруга, вне
-       полосы не двигается вообще */
-    const st = carvePath(path, R, 0, { sign: -1, limit: Q.limit, spd: opts.spd || Q.spd, ringIters: -1 });
-    const sc = snapChannel(path, R, path.nrms);
-    smoothNormalsNear(path, 4 * R, 6);
-    const L = pathLen(path);
+    rp.nrms = opts.rawNormals ? rp.nrms : cleanNormals(rp.path, rp.nrms, opts.win || 3, opts.deg || 35);
+    const snap0 = snapshot();
+    pushHist(snap0);                  // отмена вернёт и кузов, и канат
+    /* «🔥 Прожечь»: канат встраивается в кузов. Кожа внутри следа удаляется
+       (её узлы не сдвигаются ни на единицу), на её место встают грани самого
+       каната — полуцилиндр R и два полукруглых торца; между кромкой кожи и
+       каналом зашивается узкая лента. Канат как объект сцены исчезает. */
+    const Q = { 1: { spd: 2.5, limit: 30000 }, 2: { spd: 3, limit: 90000 },
+                3: { spd: 4, limit: 180000 } }[ropeQual] || { spd: 3, limit: 90000 };
+    const cr = cutGrooveByRope(rp, Object.assign({}, opts, { spd: opts.spd || Q.spd, limit: Q.limit }));
+    if (cr.ok === false) {
+      if (opts.dbg) console.log('[burn] отказ:', cr.why);
+      restore(snap0);
+      hist.pop();
+      if (typeof syncHistButtons === 'function') syncHistButtons();
+      syncInfo(`🔥 выжечь канал не вышло: ${cr.why} — кузов не тронут`);
+      return null;
+    }
+    if (opts.dbg) console.log('[cut]', JSON.stringify(cr));
+    const L = cr.L;
     const secs = (performance.now() - t0) / 1000;
     const name = rp.name;
     setAbsorbed(rp, true);            // канат уходит: то, что выступало, не существует
     ropeSel = pickRope();
     tintRopes();
     syncRopeRow();
-    const out = { rope: name, mode: 'cut', width: (R * 2) / U, depth: (R / U),
-      len: L / U, moved: sc.moved, added: st.added,
-      secs };
+    const out = { rope: name, mode: 'cut', width: (R * 2) / U, depth: R / U, len: L / U,
+      removed: cr.removedFaces, stations: cr.M, belt: cr.beltFaces,
+      wall: (cr.M - 1) * cr.K * 2, caps: 2 * (cr.K + cr.J) * 2, added: cr.M * (cr.K - 1) + 40,
+      M: cr.M, K: cr.K, J: cr.J, ringVerts: cr.ring, vertsFrom: cr.vertsFrom, dn0: cr.dn0,
+      stS: cr.stS, wallFrom: cr.wallFrom,
+      wallTo: cr.wallTo, sealed: cr.sealed, windFaults: cr.windFaults, secs };
     rp.burn = out;
     syncInfo(`🔥 канал по канату «${name}»: ${(R * 2 / U).toFixed(2)} мм шириной, ` +
-      `глубиной ${(sc.maxd / U).toFixed(2)} мм, длина ${(L / U).toFixed(1)} мм · ` +
-      `стенка по сечению каната (${sc.moved} узлов) · сгущено на +${st.added} точек · ` +
-      `самого каната больше нет — то, что выступало, пропало · ${secs.toFixed(2)} с`);
+      `${(R / U).toFixed(2)} мм глубиной, длина ${(L / U).toFixed(1)} мм · ` +
+      `кожа внутри следа удалена (${cr.removedFaces} граней), на её место встали грани каната ` +
+      `(${cr.M} станций × ${cr.K}, ${(cr.M - 1) * cr.K * 2} граней + торцы и лента) · ` +
+      `узлы кожи не сдвинуты · самого каната нет · ${secs.toFixed(2)} с`);
     return out;
+  }
+
+  /* ---------- «Прожечь»: канат встраивается в кузов ----------
+     Кожа внутри следа каната не продавливается: грани, целиком попавшие в след,
+     удаляются, координаты оставшихся узлов кожи не меняются ни на единицу. На их
+     место встают грани самого каната — полуцилиндр радиуса R с двумя
+     полукруглыми торцами, — а между кромкой кожи и каналом зашивается узкая
+     лента. Самого каната как объекта сцены после этого нет: в модели остаётся
+     только он, вдавленный в кожу. */
+  function cutGrooveByRope(rp, opts = {}) {
+    const R = rp.radius;
+    const path = rp.path, nrms = rp.nrms;
+    const nSeg = path.length - 1;
+    if (nSeg < 2) return { ok: false, why: 'путь каната слишком короткий' };
+    const segLen = new Float64Array(nSeg), sAt = new Float64Array(nSeg + 1);
+    for (let i = 0; i < nSeg; i++) {
+      segLen[i] = Math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1],
+        path[i + 1][2] - path[i][2]);
+      sAt[i + 1] = sAt[i] + segLen[i];
+    }
+    const L = sAt[nSeg];
+    const nmAt = (i, u) => {
+      const a = nrms[i] || [0, 1, 0], b = nrms[i + 1] || a;
+      let x = a[0] + (b[0] - a[0]) * u, y = a[1] + (b[1] - a[1]) * u, z = a[2] + (b[2] - a[2]) * u;
+      const l = Math.hypot(x, y, z) || 1;
+      return [x / l, y / l, z / l];
+    };
+    const ptAt = (i, u) => [path[i][0] + (path[i + 1][0] - path[i][0]) * u,
+      path[i][1] + (path[i + 1][1] - path[i][1]) * u,
+      path[i][2] + (path[i + 1][2] - path[i][2]) * u];
+    const segAt = (s) => {
+      const sc = s < 0 ? 0 : s > L ? L : s;
+      let i = 0;
+      while (i < nSeg - 1 && sAt[i + 1] < sc) i++;
+      return { i, u: segLen[i] > 1e-12 ? (sc - sAt[i]) / segLen[i] : 0 };
+    };
+    function probe(px, py, pz) {
+      let best = Infinity, bi = 0, bu = 0;
+      for (let i = 0; i < nSeg; i++) {
+        const a = path[i], b = path[i + 1];
+        const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+        const l2 = dx * dx + dy * dy + dz * dz;
+        let u = l2 > 1e-12 ? ((px - a[0]) * dx + (py - a[1]) * dy + (pz - a[2]) * dz) / l2 : 0;
+        u = u < 0 ? 0 : u > 1 ? 1 : u;
+        const qx = px - (a[0] + dx * u), qy = py - (a[1] + dy * u), qz = pz - (a[2] + dz * u);
+        const d2 = qx * qx + qy * qy + qz * qz;
+        if (d2 < best) { best = d2; bi = i; bu = u; }
+      }
+      const A = ptAt(bi, bu), n = nmAt(bi, bu);
+      const rx = px - A[0], ry = py - A[1], rz = pz - A[2];
+      const dn = rx * n[0] + ry * n[1] + rz * n[2];
+      const ix = rx - n[0] * dn, iy = ry - n[1] * dn, iz = rz - n[2] * dn;
+      const t = Math.hypot(ix, iy, iz);
+      let s = sAt[bi] + segLen[bi] * bu;
+      if (bi === 0 && bu <= 1e-9) {
+        const a = path[0], b = path[1];
+        const l = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) || 1;
+        const w = (rx * (b[0] - a[0]) + ry * (b[1] - a[1]) + rz * (b[2] - a[2])) / l;
+        if (w < 0) s = w;
+      } else if (bi === nSeg - 1 && bu >= 1 - 1e-9) {
+        const a = path[nSeg - 1], b = path[nSeg];
+        const l = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) || 1;
+        const w = ((px - b[0]) * (b[0] - a[0]) + (py - b[1]) * (b[1] - a[1]) +
+          (pz - b[2]) * (b[2] - a[2])) / l;
+        if (w > 0) s = L + w;
+      }
+      const a = path[bi], b = path[bi + 1];
+      let tx = b[0] - a[0], ty = b[1] - a[1], tz = b[2] - a[2];
+      const tl = Math.hypot(tx, ty, tz) || 1;
+      tx /= tl; ty /= tl; tz /= tl;
+      const bx = ty * n[2] - tz * n[1], by = tz * n[0] - tx * n[2], bz = tx * n[1] - ty * n[0];
+      const side = t > 1e-9 ? (Math.sign(ix * bx + iy * by + iz * bz) || 1) : 1;
+      return { s, t, side, n, dn };
+    }
+    /* точка кожи в координатах каната: s вдоль, t в стороне (со знаком), h вниз */
+    function atST(s, t, h) {
+      const { i, u } = segAt(s);
+      const A = ptAt(i, u), n = nmAt(i, u);
+      const a = path[i], b = path[i + 1];
+      let tx = b[0] - a[0], ty = b[1] - a[1], tz = b[2] - a[2];
+      const tl = Math.hypot(tx, ty, tz) || 1;
+      tx /= tl; ty /= tl; tz /= tl;
+      let bx = ty * n[2] - tz * n[1], by = tz * n[0] - tx * n[2], bz = tx * n[1] - ty * n[0];
+      const bl = Math.hypot(bx, by, bz) || 1;
+      bx /= bl; by /= bl; bz /= bl;
+      return [A[0] + bx * t + n[0] * h, A[1] + by * t + n[1] * h, A[2] + bz * t + n[2] * h];
+    }
+    const cache = new Map();
+    const P = (v) => {
+      let p = cache.get(v);
+      if (!p) { const o = v * 3; p = probe(src[o], src[o + 1], src[o + 2]); cache.set(v, p); }
+      return p;
+    };
+    /* след каната — «стадион»: |t| < R и 0 < s < L. Узлы других оболочек
+       (изнанка, стекло за уступом) в след не попадают. */
+    const slab = 1.6 * R;
+    const F = (v) => {
+      const p = P(v);
+      if (p.dn < -slab || p.dn > slab) return 1e6;
+      return Math.max(p.t - R, Math.max(-p.s, p.s - L));
+    };
+    function addFileVert(p) {
+      const nv = count;
+      const ns = new Float32Array((count + 1) * 3);
+      ns.set(src); ns[nv * 3] = p[0]; ns[nv * 3 + 1] = p[1]; ns[nv * 3 + 2] = p[2];
+      count += 1;
+      applySrc(ns);
+      const nc2 = new Float32Array(count * 3).fill(1);
+      nc2.set(col); col = nc2;
+      geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      resizeNodeArrays(vk + 1);
+      const node = vk;
+      const ncanon = new Int32Array(count); ncanon.set(canon); ncanon[count - 1] = node;
+      canon = ncanon;
+      const nrep = new Int32Array(vk + 1); nrep.set(topo.rep); nrep[node] = nv;
+      vk += 1;
+      topo.canon = canon; topo.rep = nrep; topo.vk = vk; topo.count = count;
+      pos[node * 3] = p[0]; pos[node * 3 + 1] = p[1]; pos[node * 3 + 2] = p[2];
+      pos0[node * 3] = p[0]; pos0[node * 3 + 1] = p[1]; pos0[node * 3 + 2] = p[2];
+      added[node] = 1;
+      topoDirty = true; nrm = null;
+      return nv;
+    }
+    const extraFaces = [];
+    const pushFace = (a, b, c) => {
+      if (a === undefined || b === undefined || c === undefined) return;
+      if (a === b || b === c || c === a) return;        // вырожденный — пропускаем
+      extraFaces.push(a, b, c);
+    };
+    const commitFaces = () => {
+      if (!extraFaces.length) return;
+      const li = new Int32Array(liveIndex.length + extraFaces.length);
+      li.set(liveIndex); li.set(extraFaces, liveIndex.length);
+      extraFaces.length = 0;
+      setIndex(li);
+      flush();
+    };
+    function rimScan() {
+      const em = new Map();
+      const li = liveIndex;
+      for (let i = 0; i < li.length; i += 3) {
+        const a = li[i], b = li[i + 1], c = li[i + 2];
+        for (const [x, y] of [[a, b], [b, c], [c, a]]) {
+          const key = x < y ? x + ':' + y : y + ':' + x;
+          const e = em.get(key);
+          if (e) e.n++; else em.set(key, { a: x, b: y, n: 1 });
+        }
+      }
+      const rim = [];
+      for (const e of em.values()) if (e.n === 1) rim.push(e);
+      const adj = new Map();
+      for (const e of rim) {
+        if (!adj.has(e.a)) adj.set(e.a, []);
+        if (!adj.has(e.b)) adj.set(e.b, []);
+        adj.get(e.a).push(e.b);
+        adj.get(e.b).push(e.a);
+      }
+      const usedE = new Set();
+      const ekey = (x, y) => (x < y ? x + ':' + y : y + ':' + x);
+      const loops = [];
+      for (const e of rim) {
+        if (usedE.has(ekey(e.a, e.b))) continue;
+        const loop = [e.a];
+        usedE.add(ekey(e.a, e.b));
+        let prev = e.a, cur = e.b;
+        for (let guard = 0; guard < rim.length + 2 && cur !== e.a; guard++) {
+          loop.push(cur);
+          let nxt = -1;
+          for (const w of adj.get(cur) || []) {
+            if (w === prev || usedE.has(ekey(cur, w))) continue;
+            nxt = w; break;
+          }
+          if (nxt < 0) break;
+          usedE.add(ekey(cur, nxt));
+          prev = cur; cur = nxt;
+        }
+        if (cur === e.a) loops.push(loop);
+      }
+      return { rim, loops };
+    }
+    function pokeFill(loop) {
+      let cx = 0, cy = 0, cz = 0;
+      for (const v of loop) { cx += src[v * 3]; cy += src[v * 3 + 1]; cz += src[v * 3 + 2]; }
+      const k = loop.length;
+      const c = addFileVert([cx / k, cy / k, cz / k]);
+      for (let i = 0; i < k; i++) {
+        const a = loop[i], b = loop[(i + 1) % k];
+        pushFace(b, a, c);
+      }
+      return c;
+    }
+    function dropIsland(loop) {
+      const want = new Set();
+      for (let i = 0; i < loop.length; i++) {
+        const a = loop[i], b = loop[(i + 1) % loop.length];
+        want.add(a + '>' + b);
+      }
+      const keep = [];
+      const li = liveIndex;
+      let del = 0;
+      for (let i = 0; i < li.length; i += 3) {
+        const a = li[i], b = li[i + 1], c = li[i + 2];
+        let hit = false;
+        for (const [x, y] of [[a, b], [b, c], [c, a]]) if (want.has(x + '>' + y)) { hit = true; break; }
+        if (hit) { del++; continue; }
+        keep.push(a, b, c);
+      }
+      setIndex(Int32Array.from(keep));
+      flush();
+      return del;
+    }
+
+    const vol = () => {
+      let v = 0;
+      const li = liveIndex, p = src;
+      for (let i = 0; i < li.length; i += 3) {
+        const a = li[i] * 3, b = li[i + 1] * 3, c = li[i + 2] * 3;
+        v += (p[a] * (p[b + 1] * p[c + 2] - p[b + 2] * p[c + 1])
+            - p[a + 1] * (p[b] * p[c + 2] - p[b + 2] * p[c])
+            + p[a + 2] * (p[b] * p[c + 1] - p[b + 1] * p[c])) / 6;
+      }
+      return v;
+    };
+    const vol0 = vol();
+
+    /* 1) сгустить полосу вдоль каната (без смещения) */
+    const sp = Math.max(0.5 * U, R / (opts.spd || 3));
+    refineBand(path, R * 1.35, sp, opts.limit || 90000, { red: true });
+    ensureTopo(); flush();
+    cache.clear();
+
+    /* 2) удалить грани, целиком попавшие в след: их место займут грани каната */
+    let removedFaces = 0;
+    {
+      const keep = [];
+      const li = liveIndex;
+      for (let i = 0; i < li.length; i += 3) {
+        const a = li[i], b = li[i + 1], c = li[i + 2];
+        if (F(a) <= 0 && F(b) <= 0 && F(c) <= 0) { removedFaces++; continue; }
+        keep.push(a, b, c);
+      }
+      setIndex(Int32Array.from(keep));
+      flush();
+      cache.clear();
+    }
+
+    /* 3) кромка: острова внутри следа убираем, мелкие дырки заклеиваем —
+       остаётся одна петля, за которую и будем пришивать канал */
+    let scan = rimScan();
+    let closedHoles = 0;
+    for (let pass = 0; pass < 8 && scan.loops.length > 1; pass++) {
+      scan.loops.sort((x, y) => y.length - x.length);
+      for (const lp of scan.loops.slice(1)) {
+        let inside = true;
+        for (const v of lp) if (P(v).t > R * 0.98) { inside = false; break; }
+        if (inside && lp.length > 3) dropIsland(lp);
+        else { pokeFill(lp); closedHoles++; }
+      }
+      commitFaces();
+      cache.clear();
+      scan = rimScan();
+    }
+    if (scan.loops.length !== 1) return { ok: false, why: `кромка распалась на ${scan.loops.length} кусков` };
+    const ring = scan.loops[0];
+    if (ring.length < 8) return { ok: false, why: 'кромка слишком короткая' };
+
+    /* 4) станции канала и его кромка — «стадион» на коже */
+    const K = 8;                                  // долей поперёк сечения
+    const sideOf = ring.map(v => P(v));
+    const nLeft = sideOf.filter(q => q.side < 0 && q.s > 0.2 * R && q.s < L - 0.2 * R).length;
+    const nRight = sideOf.filter(q => q.side > 0 && q.s > 0.2 * R && q.s < L - 0.2 * R).length;
+    const M = Math.min(240, Math.max(10, Math.round((nLeft + nRight) / 2)));
+    const vertsFrom = count;                      // с этого узла начинаются грани каната
+    const J = 6;                                  // долей по торцевой хорде
+    const stS = [];
+    for (let i = 0; i < M; i++) stS.push((L * i) / (M - 1));
+    /* высота кожи над плоскостью пути: путь висит над кожей на десятые доли
+       миллиметра, и канал надо резать от КОЖИ, а не от плоскости пути */
+    /* высоту кожи берём у ближайшего узла кромки ОТДЕЛЬНО с каждого борта: на
+       уступе панели левый и правый борт стоят на разной высоте, и среднее дало
+       бы воронку в 11 мм (ловилось стендом) */
+    const ringDn = ring.map(v => P(v).dn);
+    const medAll = (() => {
+      const a = ringDn.slice().sort((x, y) => x - y);
+      const m = a.length >> 1;
+      return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+    })();
+    const medAt = (s0, rad) => {
+      const a = [];
+      for (const v of ring) { const q = P(v); if (Math.abs(q.s - s0) <= rad) a.push(q.dn); }
+      if (a.length < 3) return medAll;
+      a.sort((x, y) => x - y);
+      const m = a.length >> 1;
+      return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+    };
+    /* высота кожи вдоль следа: медиана в окне 2R + сглаживание. На уступе
+       панели окно видит два уровня, медиана берёт преобладающий — воронок нет */
+    const lim = 1.5 * R;
+    let dnS = stS.map(s => {
+      const m = medAt(s, 2 * R);
+      return Math.max(medAll - lim, Math.min(medAll + lim, m));
+    });
+    for (let it = 0; it < 2; it++) {
+      dnS = dnS.map((v, i) => {
+        const a = dnS[Math.max(0, i - 1)], b = dnS[Math.min(dnS.length - 1, i + 1)];
+        return (a + 2 * v + b) / 4;
+      });
+    }
+    const peak = Math.max(...dnS) - Math.min(...dnS);
+    if (peak > 1.2 * R)
+      return { ok: false, why: `след идёт по уступу панели (кожа под ним скачет на ${(peak / U).toFixed(1)} мм) — проведите канат по ровному месту` };
+    const dnL = dnS, dnR = dnS;
+    const dn0 = dnS;
+    const pL = stS.map((s, i) => addFileVert(atST(s, -R, dnL[i])));
+    const pR = stS.map((s, i) => addFileVert(atST(s, R, dnR[i])));
+    /* торцевые хорды: концы — те же узлы, что и у бортов канала, иначе на
+       углах получаются два совпадающих узла и сетка там рвётся */
+    const chA = [pL[0]], chB = [pL[M - 1]];
+    for (let j = 1; j < J; j++) {
+      const t = -R + (2 * R * j) / J;
+      chA.push(addFileVert(atST(0, t, dn0[0])));
+      chB.push(addFileVert(atST(L, t, dn0[M - 1])));
+    }
+    chA.push(pR[0]);
+    chB.push(pR[M - 1]);
+    /* замкнутая кромка канала: левый борт → торец L → правый борт → торец 0 */
+    const bowl = [];
+    for (let i = 0; i < M; i++) bowl.push(pL[i]);
+    for (let j = 1; j < J; j++) bowl.push(chB[j]);
+    for (let i = M - 1; i >= 0; i--) bowl.push(pR[i]);
+    for (let j = J - 1; j >= 1; j--) bowl.push(chA[j]);
+    /* старт — угол (s = 0, t = −R) */
+    const uOf = (arr) => {
+      let tot = 0;
+      const u = [0];
+      for (let i = 1; i < arr.length; i++) {
+        const a = arr[i - 1] * 3, b = arr[i] * 3;
+        tot += Math.hypot(src[b] - src[a], src[b + 1] - src[a + 1], src[b + 2] - src[a + 2]);
+        u.push(tot);
+      }
+      const a0 = arr[arr.length - 1] * 3, b0 = arr[0] * 3;
+      tot += Math.hypot(src[b0] - src[a0], src[b0 + 1] - src[a0 + 1], src[b0 + 2] - src[a0 + 2]);
+      for (let i = 0; i < u.length; i++) u[i] /= tot;
+      return u;
+    };
+    /* петля кожи: старт с узла у того же угла */
+    let start = 0, bestD = Infinity;
+    const corner0 = atST(0, -R, 0);
+    for (let i = 0; i < ring.length; i++) {
+      const o = ring[i] * 3;
+      const d = Math.hypot(src[o] - corner0[0], src[o + 1] - corner0[1], src[o + 2] - corner0[2]);
+      if (d < bestD) { bestD = d; start = i; }
+    }
+    const ringO = ring.slice(start).concat(ring.slice(0, start));
+    const uRing = uOf(ringO), uBowl = uOf(bowl);
+
+    const patchStart = liveIndex.length / 3;
+    /* 5) лента между кромкой кожи и кромкой канала: два замкнутых обхода,
+       оба монотонны по длине дуги — сшиваем «молнией» */
+    const nA = ringO.length, nB = bowl.length;
+    let ia = 0, ib = 0;
+    const faces0 = extraFaces.length;
+    while (ia < nA || ib < nB) {
+      const na = (ia + 1) % nA, nb = (ib + 1) % nB;
+      const uaNext = ia + 1 >= nA ? uRing[na] + 1 : uRing[na];
+      const ubNext = ib + 1 >= nB ? uBowl[nb] + 1 : uBowl[nb];
+      const uaNow = ia >= nA ? 1 : uRing[ia];
+      const ubNow = ib >= nB ? 1 : uBowl[ib];
+      if (ib >= nB || (ia < nA && uaNext <= ubNext)) {
+        pushFace(ringO[ia], ringO[na], bowl[ib % nB]);
+        ia++;
+      } else {
+        pushFace(ringO[ia % nA], bowl[nb], bowl[ib]);
+        ib++;
+      }
+    }
+    const beltFaces = (extraFaces.length - faces0) / 3;
+
+    /* 6) стенка канала: ряды поперёк, концы ряда — кромка канала */
+    const rings = [], ringLat = [];
+    const wallFrom = count;                     // с этого узла идут точки дуги (ряды)
+    for (let i = 0; i < M; i++) {
+      const paL = [src[pL[i] * 3], src[pL[i] * 3 + 1], src[pL[i] * 3 + 2]];
+      const paR = [src[pR[i] * 3], src[pR[i] * 3 + 1], src[pR[i] * 3 + 2]];
+      const sg = segAt(stS[i]);
+      const n = nmAt(sg.i, sg.u);
+      const row = [pL[i]], lat = [-R];
+      for (let j = 1; j < K; j++) {
+        const th = (Math.PI * j) / K;
+        const lam = (1 - Math.cos(th)) / 2;
+        const drop = R * Math.sin(th);
+        /* хорда pL—pR уже лежит на коже: высоту кожи второй раз не добавляем,
+           иначе дно канала уходит на R+1.3 мм (ловил стенд: 3.83 вместо 2.50) */
+        const hh = -drop;                                    // от кожи вниз
+        const px2 = paL[0] + (paR[0] - paL[0]) * lam + n[0] * hh;
+        const py2 = paL[1] + (paR[1] - paL[1]) * lam + n[1] * hh;
+        const pz2 = paL[2] + (paR[2] - paL[2]) * lam + n[2] * hh;
+        row.push(addFileVert([px2, py2, pz2]));
+        lat.push(-R * Math.cos(th));
+      }
+      row.push(pR[i]);
+      lat.push(R);
+      rings.push(row); ringLat.push(lat);
+    }
+    const wallTo = count;
+    for (let i = 0; i + 1 < M; i++) {
+      const A = rings[i], B = rings[i + 1];
+      for (let j = 0; j < K; j++) {
+        pushFace(A[j], B[j], B[j + 1]);
+        pushFace(A[j], B[j + 1], A[j + 1]);
+      }
+    }
+    /* 7) торцы: полудиски между хордой и дугой торцевого ряда. Обе цепочки
+       упорядочены по поперечной координате — сшиваем «молнией». */
+    const capFill = (chord, latC, row, latR) => {
+      let i = 0, j = 0;
+      while (i < chord.length - 1 || j < row.length - 1) {
+        const nC = i < latC.length - 1 ? latC[i + 1] : Infinity;
+        const nR = j < latR.length - 1 ? latR[j + 1] : Infinity;
+        if (nC <= nR) {
+          pushFace(chord[i], chord[i + 1], row[j]);
+          i++;
+        } else {
+          pushFace(chord[i], row[j + 1], row[j]);
+          j++;
+        }
+      }
+    };
+    {
+      const chALat = [], chBLat = [];
+      for (let j = 0; j <= J; j++) chALat.push(-R + (2 * R * j) / J);
+      chBLat.push(...chALat);
+      /* торцевой ряд идёт слева направо: у s = 0 это rings[0], у s = L — последний */
+      capFill(chA, chALat, rings[0], ringLat[0]);
+      capFill(chB, chBLat, rings[M - 1], ringLat[M - 1]);
+    }
+    commitFaces();
+    ensureTopo(); flush();
+
+    /* 8) ориентация: канал должен уменьшать объём кузова, а не надувать его */
+    /* выравнивание обхода граней: соседние грани должны обходить общее ребро в
+       разные стороны. Идём от грани кузова (она заведомо правильная) и
+       разворачиваем только тех, кто с ней спорит. */
+    const orientMesh = () => {
+      const li = liveIndex, nf = li.length / 3;
+      const em = new Map();
+      for (let f = 0; f < nf; f++) {
+        for (let k = 0; k < 3; k++) {
+          const a = li[f * 3 + k], b = li[f * 3 + (k + 1) % 3];
+          const key = a < b ? a + ':' + b : b + ':' + a;
+          let arr = em.get(key);
+          if (!arr) em.set(key, arr = []);
+          arr.push(f);
+        }
+      }
+      const done = new Uint8Array(nf);
+      const out = new Int32Array(li.length);
+      let flips = 0;
+      for (let f0 = 0; f0 < nf; f0++) {
+        if (done[f0]) continue;
+        const stack = [f0];
+        done[f0] = 1;
+        out[f0 * 3] = li[f0 * 3]; out[f0 * 3 + 1] = li[f0 * 3 + 1]; out[f0 * 3 + 2] = li[f0 * 3 + 2];
+        while (stack.length) {
+          const f = stack.pop();
+          const cur = [out[f * 3], out[f * 3 + 1], out[f * 3 + 2]];
+          for (let k = 0; k < 3; k++) {
+            const a = cur[k], b = cur[(k + 1) % 3];
+            const key = a < b ? a + ':' + b : b + ':' + a;
+            for (const g of em.get(key) || []) {
+              if (g === f || done[g]) continue;
+              const x = li[g * 3], y = li[g * 3 + 1], z = li[g * 3 + 2];
+              let same = false;
+              for (const [p2, q2] of [[x, y], [y, z], [z, x]]) if (p2 === a && q2 === b) same = true;
+              done[g] = 1;
+              if (same) { out[g * 3] = x; out[g * 3 + 1] = z; out[g * 3 + 2] = y; flips++; }
+              else { out[g * 3] = x; out[g * 3 + 1] = y; out[g * 3 + 2] = z; }
+              stack.push(g);
+            }
+          }
+        }
+      }
+      setIndex(out);
+      flush();
+      return flips;
+    };
+    /* страховка: если после сшивки остались мелкие дырки — заклеиваем веером */
+    let sealed = 0;
+    for (let pass = 0; pass < 4; pass++) {
+      const sc2 = rimScan();
+      if (!sc2.rim.length) break;
+      let maxLen = 0;
+      for (const lp of sc2.loops) maxLen = Math.max(maxLen, lp.length);
+      if (pass === 0 && opts.dbg) console.log('[cut] после патча дырок', sc2.loops.length, 'крупнейшая', maxLen);
+      if (maxLen > 120) break;
+      for (const lp of sc2.loops) pokeFill(lp);
+      sealed += sc2.loops.length;
+      commitFaces();
+      cache.clear();
+    }
+    /* локальная сварка узлов по месту: закрывает «щипки», когда грань канала
+       и грань кожи делят ребро геометрически, но не по индексам */
+    const weldVerts = (eps) => {
+      const vk = count, inv = 1 / eps;
+      const map = new Map(), remap = new Int32Array(vk).fill(-1);
+      let merged = 0;
+      for (let v = 0; v < vk; v++) {
+        const o = v * 3;
+        const k = `${Math.round(src[o] * inv)},${Math.round(src[o + 1] * inv)},${Math.round(src[o + 2] * inv)}`;
+        const hit = map.get(k);
+        if (hit === undefined) { map.set(k, v); remap[v] = v; } else { remap[v] = hit; merged++; }
+      }
+      if (!merged) return 0;
+      const li = liveIndex, out = [];
+      const rep = (v) => remap[v] < 0 ? v : remap[v];
+      for (let f = 0; f < li.length; f += 3) {
+        const a = rep(li[f]), b = rep(li[f + 1]), c = rep(li[f + 2]);
+        if (a === b || b === c || c === a) continue;
+        out.push(a, b, c);
+      }
+      setIndex(new Int32Array(out));
+      flush();
+      return merged;
+    };
+    /* приёмка по тому же критерию, что и в стендах: checkMesh не должен видеть
+       ни дыр, ни щипков, ни вывернутых граней — иначе кузов не трогаем */
+    const meshFaults = () => {
+      const pos = Float32Array.from(src.subarray(0, count * 3));
+      const idx = Uint32Array.from(liveIndex);
+      const cc = checkMesh(buildTopology(pos, idx), idx, pos, U);
+      return cc.watertight ? 0 : cc.openEdges + cc.nonManifold + cc.flipEdges + cc.degenerate;
+    };
+    const openLeft = rimScan().rim.length;
+    if (openLeft) {
+      /* остались дырки — сшивка не сошлась: откатываемся целиком */
+      return { ok: false, why: `не удалось зашить стык кожи и канала (${openLeft} открытых рёбер)` };
+    }
+    /* сварка совпавших по месту узлов: иначе сетка закрыта по индексам, но
+       «щиплется» — checkMesh видит 63 ребра с одинаковым обходом (стенд) */
+    const welded = 0;
+    const oriented = orientMesh();
+    const windFaults = meshFaults();
+    if (windFaults)
+      return { ok: false, why: `шов кожи и канала не сошёлся (${windFaults} дефектов сетки)` };
+
+    /* orientMesh выровнял обход ВСЕХ граней по соседям, поэтому отдельный
+       разворот патча больше не нужен: он ломал согласованность (стенд ловил
+       63 ребра с неверным обходом) */
+    const flipped = false;
+    return { ok: true, removedFaces, closedHoles, ring: ring.length, M, K, J,
+      beltFaces, wallFaces: (M - 1) * K * 2, stations: M, L, R, vertsFrom, dn0, sealed,
+      wallFrom, wallTo, welded,
+      stS: stS.slice(), windFaults,
+      volume: vol(), volBefore: vol0, flipped, oriented };
   }
 
   /** канат перестал быть отдельным объектом (впаян в кузов) — прячем/возвращаем.
