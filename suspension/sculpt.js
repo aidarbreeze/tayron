@@ -33,7 +33,7 @@ import {
   euclidFalloff,
   mirrorDeltas, checkMesh
 } from './meshops.js';
-import { pathLen, smoothPath, resamplePath, tubeArrays, smoothWindow, pathTurn, pathKink, relaxPath, straightPath } from './ropes.js';
+import { pathLen, smoothPath, resamplePath, tubeArrays, arcTubeArrays, cleanNormals, smoothWindow, pathTurn, pathKink, relaxPath, straightPath } from './ropes.js';
 
 const MAXSTEPS = 60;    // итераций за одно нажатие при «Степень» 100 %
                         // (было 600: одно нажатие на 25 % утаскивало узел на 1.6 мм —
@@ -690,7 +690,8 @@ export function initSculpt(opts) {
       // массивы топологии заменяются целиком (никогда не правятся на месте),
       // поэтому ссылок достаточно — копия не нужна
       T: { src, index: liveIndex, count, vk },
-      ropeOff: ropes.map(r => r.off)      // канат лежит/утоплен — тоже часть правки
+      ropeOff: ropes.map(r => r.off),     // канат лежит/утоплен — тоже часть правки
+      absorbed: ropes.map(r => !!r.absorbed)   // впаянные в кузов канаты (их нет в сцене)
     };
   }
   let dirty = false;                 // в правке есть несохранённое — предупредим при закрытии
@@ -733,6 +734,11 @@ export function initSculpt(opts) {
     nrm = null;
     paintMarks(); free = freeMask(topo, reg);
     updateAddedDots();
+    if (s.absorbed && s.absorbed.length === ropes.length) {
+      ropes.forEach((rp, i) => { if (!!rp.absorbed !== !!s.absorbed[i]) setAbsorbed(rp, s.absorbed[i]); });
+      ropeSel = pickRope();
+      tintRopes();
+    }
     if (s.ropeOff && s.ropeOff.length === ropes.length) {
       ropes.forEach((rp, i) => {
         if (Math.abs(rp.off - s.ropeOff[i]) > 1e-9) { rp.off = s.ropeOff[i]; rebuildRope(rp); syncRopeRow(); }
@@ -2147,7 +2153,7 @@ export function initSculpt(opts) {
       /* последние 18 % радиуса — мягкий вход: стенка полуцилиндра у кромки
          вертикальная, и на гранях 0.2 мм кромка выглядела рваной */
       if (u > 0.93) { const q = (u - 0.93) / 0.07; f *= 1 - q * q * (3 - 2 * q); }
-      const s = -depth * f;
+      const s = depth * f * (opts.sign || -1);   // sign −1: вдавить, +1: поднять
       if (s === 0) continue;
       /* Вдавливаем не по «своей» нормали узла, а по нормали поверхности в этой
          точке пути: всё сечение едет в одну сторону, как настоящий резец —
@@ -2161,12 +2167,23 @@ export function initSculpt(opts) {
         const le = Math.hypot(ex, ey, ez) || 1;
         ex /= le; ey /= le; ez /= le;
       }
+      /* Полоса одной поверхности: если узел лежит в стороне от плоскости кожи
+         (другая панель за уступом, изнанка), его не трогаем. Без этого ребро
+         «перетекало» через край панели: за уступом высотой 10 мм поверхность
+         поднималась на 11 мм вместо 2.5 — проверено стендом rope_half. */
+      if (opts.slab && pn) {
+        const A3 = path[pr.seg], B3 = path[pr.seg + 1], t3 = pr.t || 0;
+        const qx = px - (A3[0] + (B3[0] - A3[0]) * t3);
+        const qy = py - (A3[1] + (B3[1] - A3[1]) * t3);
+        const qz = pz - (A3[2] + (B3[2] - A3[2]) * t3);
+        if (Math.abs(qx * ex + qy * ey + qz * ez) > opts.slab) { skipped++; continue; }
+      }
       /* Только «своя» сторона: узел, у которого нормаль смотрит против нормали
          пути, — это обратная стенка панели. Раньше её тоже вдавливало, и на
          тонком кузове она протыкала наружную стенку: на месте канала получался
          кратер с видимой изнанкой (борозда «насквозь»). */
       const nl = Math.hypot(nv[o], nv[o + 1], nv[o + 2]) || 1;
-      if ((nv[o] * ex + nv[o + 1] * ey + nv[o + 2] * ez) / nl < 0.15) { skipped++; continue; }
+      if ((nv[o] * ex + nv[o + 1] * ey + nv[o + 2] * ez) / nl < (opts.minDot || 0.15)) { skipped++; continue; }
       pos[o] += ex * s;
       pos[o + 1] += ey * s;
       pos[o + 2] += ez * s;
@@ -2447,8 +2464,16 @@ export function initSculpt(opts) {
     const M = THREE.MeshStandardMaterial || THREE.MeshBasicMaterial;
     return new M({ color: 0x2b2c31, roughness: 0.72, metalness: 0.08 });
   }
+  /** Трубка каната: пока канат утоплен в кузов — только его наружная часть,
+      остальное не существует вовсе (см. arcTubeArrays). Приподняли выше
+      радиуса — снова полная трубка, скрывать нечего. */
+  function ropeTube(rp) {
+    return rp.off < rp.radius * 0.999
+      ? arcTubeArrays(rp.path, rp.nrms, rp.radius, ROPE_SIDES, rp.off)
+      : tubeArrays(rp.path, rp.nrms, rp.radius, ROPE_SIDES, rp.off);
+  }
   function buildRopeMesh(rp) {
-    const t = tubeArrays(rp.path, rp.nrms, rp.radius, ROPE_SIDES, rp.off);
+    const t = ropeTube(rp);
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(t.positions, 3));
     g.setIndex(new THREE.BufferAttribute(t.index, 1));
@@ -2472,8 +2497,8 @@ export function initSculpt(opts) {
       if (m.emissive && typeof m.emissive.setHex === 'function') m.emissive.setHex(i === ropeSel ? 0x2a1100 : 0x000000);
     });
   }
-  function newRope(pts, nrms, R) {
-    const rp = { name: `Канат ${++ropeSeq}`, path: pts, nrms, radius: R, off: R, mesh: null, tube: null, burn: null,
+  function newRope(pts, nrms, R, off = 0) {
+    const rp = { name: `Канат ${++ropeSeq}`, path: pts, nrms, radius: R, off, mesh: null, tube: null, burn: null,
       path0: pts.map(q => q.slice()), nrms0: nrms ? nrms.map(q => q.slice()) : null };
     rp.mesh = buildRopeMesh(rp);
     ropes.push(rp);
@@ -2491,6 +2516,7 @@ export function initSculpt(opts) {
   function removeRope(i = ropeSel) {
     const rp = ropes[i];
     if (!rp) { syncInfo('канатов нет — сначала проведите канат по кузову'); return 0; }
+    if (rp.absorbed) { syncInfo('канат уже впаян в кузов — убирайте его через Ctrl+Z, как обычную правку'); return ropes.filter(r => !r.absorbed).length; }
     detachFromScene(rp.mesh);
     ropes.splice(i, 1);
     ropeSel = ropes.length ? Math.min(i, ropes.length - 1) : -1;
@@ -2502,8 +2528,14 @@ export function initSculpt(opts) {
   function syncRopeRow() {
     const el = $('sc-ropeinfo');
     if (!el) return;
-    if (!ropes.length) { el.textContent = 'канатов нет — проведите канат по кузову'; return; }
-    const rp = ropes[ropeSel] || ropes[ropes.length - 1];
+    const live = ropes.filter(r => !r.absorbed);
+    if (!live.length) {
+      el.textContent = ropes.length
+        ? `канатов нет — все ${ropes.length} впаяны в кузов, ребро теперь часть модели`
+        : 'канатов нет — проведите канат по кузову';
+      return;
+    }
+    const rp = (ropes[ropeSel] && !ropes[ropeSel].absorbed ? ropes[ropeSel] : live[live.length - 1]);
     const L = pathLen(rp.path);
     el.textContent = `канатов ${ropes.length} · «${rp.name}»: ${(L / U).toFixed(1)} мм, ` +
       `⌀${(rp.radius * 2 / U).toFixed(1)} мм · излом ${pathTurn(rp.path).toFixed(0)}°` +
@@ -2651,7 +2683,7 @@ export function initSculpt(opts) {
     if (!rp || !rp.path0) { syncInfo('вернуть нечего — канат уже как провели'); return null; }
     rp.path = rp.path0.map(q => q.slice());
     rp.nrms = rp.nrms0 ? rp.nrms0.map(q => q.slice()) : rp.nrms;
-    rp.off = rp.radius;
+    rp.off = 0;                                  // как провели: вполовину в кузове
     rebuildRope(rp);
     syncRopeRow();
     syncInfo(`канат «${rp.name}» возвращён к исходной линии (${(pathLen(rp.path) / U).toFixed(1)} мм)`);
@@ -2792,11 +2824,69 @@ export function initSculpt(opts) {
     return rp.burn;
   }
 
+  /** канат перестал быть отдельным объектом (впаян в кузов) — прячем/возвращаем.
+      Так отмена и возврат работают и на геометрию, и на сам канат. */
+  function setAbsorbed(rp, on) {
+    rp.absorbed = !!on;
+    if (on) {
+      if (rp.mesh) detachFromScene(rp.mesh);
+    } else if (!rp.mesh || !inScene(rp.mesh)) {
+      rp.mesh = buildRopeMesh(rp);
+    }
+  }
+  function inScene(obj) {
+    const par = mesh.parent || mesh;
+    return !!(par && par.children && par.children.includes(obj));
+  }
+  function pickRope() {
+    for (let i = ropes.length - 1; i >= 0; i--) if (!ropes[i].absorbed) return i;
+    return -1;
+  }
+
+  /** ◍ Впаять: наружная половина каната становится частью кузова.
+      Поверхность под канатом поднимается ровно на профиль полуцилиндра
+      (зеркало «Прожечь»), сам канат уходит из сцены: отдельного объекта
+      больше нет, есть кузов с полукруглым ребром. Всё, что было ниже
+      поверхности, не появляется вовсе — этих треугольников не существует. */
+  function fuseRope(i = ropeSel, opts = {}) {
+    const rp = ropes[i];
+    if (!rp || rp.absorbed) { syncInfo('впаивать нечего: сначала проведите канат по кузову'); return null; }
+    const t0 = performance.now();
+    const R = rp.radius;
+    const path = rp.path.slice();
+    /* нормали без выбросов: у кромки панели одиночная боковая нормаль уводила
+       ребро за край (проверено стендом rope_half — 11 мм вместо 2.5) */
+    path.nrms = opts.rawNormals ? rp.nrms : cleanNormals(rp.path, rp.nrms, opts.win || 3, opts.deg || 35);
+    pushHist();                                     // отмена вернёт и кузов, и канат
+    const Q = { 1: { spd: 3.5, limit: 20000, snap: false },
+                2: { spd: 5, limit: 80000, snap: true },
+                3: { spd: 6.5, limit: 160000, snap: true } }[ropeQual] || { spd: 5, limit: 80000, snap: true };
+    const st = carvePath(path, R, R, { sign: 1, limit: Q.limit, spd: opts.spd || Q.spd, ringIters: opts.ringIters === undefined ? 3 : opts.ringIters,
+      snap: opts.snap === undefined ? Q.snap : opts.snap, red: opts.red === undefined ? true : opts.red,
+      minDot: opts.minDot, slab: opts.slab === undefined ? R * 0.75 : opts.slab });
+    smoothNormalsNear(path, 4 * R, 6);
+    const L = pathLen(path);
+    const secs = (performance.now() - t0) / 1000;
+    const name = rp.name;
+    setAbsorbed(rp, true);
+    ropeSel = pickRope();
+    tintRopes();
+    syncRopeRow();
+    const out = { rope: name, width: R * 2, height: st.maxd, len: L, moved: st.moved,
+      added: st.added, secs, vertsAfter: vk };
+    rp.fuse = out;
+    syncInfo(`◍ канат «${name}» впаян в кузов: ребро ${(st.maxd / U).toFixed(2)} мм высотой, ` +
+      `${(R * 2 / U).toFixed(2)} мм шириной, длина ${(L / U).toFixed(1)} мм · ` +
+      `новых точек ${st.added}, поднято ${st.moved} · ${secs.toFixed(2)} с · ` +
+      `нижней половины каната нет — её не существует`);
+    return out;
+  }
+
   /** сохранить выбранный канат отдельным файлом — он и правда отдельный объект */
   function saveRope(kind = '3mf') {
     const rp = ropes[ropeSel];
     if (!rp) { syncInfo('канатов нет — сохранять нечего'); return null; }
-    const t = rp.tube || tubeArrays(rp.path, rp.nrms, rp.radius, ROPE_SIDES, rp.off);
+    const t = rp.tube || ropeTube(rp);
     let bytes, name;
     if (kind === 'stl') {
       bytes = meshToSTL(t.positions, t.index, 'канат');
@@ -4250,6 +4340,8 @@ export function initSculpt(opts) {
       ? 'канат: тяните по кузову мышью — он останется на гранях (Shift — приподнять/утопить)'
       : 'канат: снова прокладывается линией по кузову');
   });
+  const btnFuse = $('sc-fuse');
+  if (btnFuse) btnFuse.addEventListener('click', () => fuseRope());
   const btnReset = $('sc-rope-reset');
   if (btnReset) btnReset.addEventListener('click', () => ropeReset());
   const ropeQEl = $('sc-ropeq');
@@ -4740,11 +4832,12 @@ export function initSculpt(opts) {
     get deletedCount() { return delTotal; },
     get symmetrical() { return sym; },
     /* канат: отдельные объекты сцены и прожиг канала под их форму */
-    get ropeCount() { return ropes.length; },
+    get ropeCount() { return ropes.filter(r => !r.absorbed).length; },
     get ropeSelected() { return ropeSel; },
     get ropeDrawing() { return !!ropePts; },
     ropeList: () => ropes.map((rp, i) => ({
       i, name: rp.name, len: pathLen(rp.path), radius: rp.radius, off: rp.off, burn: rp.burn,
+      absorbed: !!rp.absorbed, fuse: rp.fuse || null,
       verts: rp.tube ? rp.tube.verts : 0, tris: rp.tube ? rp.tube.index.length / 3 : 0,
       inScene: (() => {
         const par = mesh.parent || mesh;
@@ -4753,6 +4846,7 @@ export function initSculpt(opts) {
     })),
     ropeMesh: (i = ropeSel) => (ropes[i] ? ropes[i].mesh : null),
     ropePath: (i = ropeSel) => (ropes[i] ? ropes[i].path : null),
+    ropeNormals: (i = ropeSel) => (ropes[i] && ropes[i].nrms ? ropes[i].nrms : null),
     addRope(pts, nrms, radiusMM) {
       if (!pts || pts.length < 2) return null;
       const R = Math.max(0.2, (radiusMM || ropeWMM)) * U;
@@ -4762,6 +4856,8 @@ export function initSculpt(opts) {
       return newRope(rs.pts, rs.nrms, R);
     },
     burnRope: (i = ropeSel) => burnRope(i),
+    fuseRope: (i = ropeSel, opts) => fuseRope(i, opts || {}),
+    get ropeAbsorbed() { return ropes.filter(r => r.absorbed).length; },
     ropeAlign: (kind) => ropeAlign(kind),
     ropeLift: (d) => ropeLift(d),
     ropeReset: () => ropeReset(),

@@ -151,6 +151,101 @@ export function tubeArrays(path, nrms, radius, sides = 10, off = 0) {
   return { positions, index, rings: n, sides: S, verts, radius, off };
 }
 
+/** Нормали пути без выбросов: у кромки панели луч попадает в крутую грань, и
+    одна-две нормали смотрят вбок. Если по ним поднимать поверхность, полоса
+    «съезжает» за край панели (проверено стендом rope_half: у уступа 10 мм
+    поверхность поднималась на 11 мм). Среднее по окну + порог 35°: одиночный
+    выброс заменяется на среднее, плавный изгиб остаётся как есть. */
+export function cleanNormals(pts, nrms, win = 3, deg = 35, rounds = 2) {
+  if (!nrms || nrms.length !== pts.length) return nrms;
+  const lim = (deg * Math.PI) / 180;
+  const unit = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+  const angle = (a, b) => Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])));
+  let cur = nrms.map(unit);
+  for (let r = 0; r < rounds; r++) {
+    const next = cur.map((n) => n.slice());
+    for (let i = 0; i < cur.length; i++) {
+      let sx = 0, sy = 0, sz = 0, k = 0;
+      for (let j = Math.max(0, i - win); j <= Math.min(cur.length - 1, i + win); j++) {
+        sx += cur[j][0]; sy += cur[j][1]; sz += cur[j][2]; k++;
+      }
+      const avg = unit([sx / k, sy / k, sz / k]);
+      if (angle(cur[i], avg) > lim) next[i] = avg;
+    }
+    cur = next;
+  }
+  return cur;
+}
+
+/** Трубка, обрезанная поверхностью: остаётся только часть, которая торчит
+    НАД плоскостью поверхности, всё, что ушло внутрь модели, не рисуется и не
+    существует. Сечение — круговой сегмент, закрытый хордой (плоским срезом).
+
+    off — насколько ось трубки приподнята над поверхностью вдоль нормали:
+      off = 0     — половина каната (сегмент 180°, ровно то, что нужно);
+      off = R     — канат лежит сверху целиком (сегмент 360°, обычная трубка);
+      off = −R/2  — канат утоплен на полтора радиуса, видна четверть.
+    Плоскость среза локальная: своя в каждом кольце, по нормали поверхности,
+    поэтому на изогнутом кузове срез идёт по коже, а не по одной плоскости. */
+export function arcTubeArrays(path, nrms, radius, sides = 10, off = 0) {
+  const n = path.length;
+  const R = radius;
+  const S = Math.max(4, (sides | 0) + (sides % 2));      // точки на дуге, включая концы
+  const s0 = Math.max(-1, Math.min(1, -off / R));        // sin(a0): что ниже — отрезано
+  const a0 = Math.asin(s0), a1 = Math.PI - a0;           // дуга: a0 … a1
+  const verts = n * S;                                   // только кольца: торцы — веера
+  const positions = new Float32Array(verts * 3);
+  const tris = (n - 1) * ((S - 1) * 2 + 2) + (S - 2) * 2; // бока + дно + два торца
+  const index = new Uint32Array(tris * 3);
+  let ii = 0;
+  const put = (v, p) => { positions[v * 3] = p[0]; positions[v * 3 + 1] = p[1]; positions[v * 3 + 2] = p[2]; };
+  for (let i = 0; i < n; i++) {
+    const t = tangentAt(path, i);
+    let up = nrms && nrms[i] ? nrms[i] : [0, 1, 0];
+    up = sub(up, mul(t, dot(up, t)));
+    if (Math.hypot(up[0], up[1], up[2]) < 1e-6) {
+      up = Math.abs(t[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+      up = sub(up, mul(t, dot(up, t)));
+    }
+    up = norm(up);
+    const e1 = cross(up, t);
+    const nrm = nrms && nrms[i] ? nrms[i] : up;
+    const c = [path[i][0] + nrm[0] * off, path[i][1] + nrm[1] * off, path[i][2] + nrm[2] * off];
+    for (let j = 0; j < S; j++) {
+      const a = a0 + (a1 - a0) * (j / (S - 1));
+      put(i * S + j, [c[0] + R * (Math.cos(a) * e1[0] + Math.sin(a) * up[0]),
+                      c[1] + R * (Math.cos(a) * e1[1] + Math.sin(a) * up[1]),
+                      c[2] + R * (Math.cos(a) * e1[2] + Math.sin(a) * up[2])]);
+    }
+  }
+  /* бока */
+  for (let i = 0; i < n - 1; i++) {
+    for (let j = 0; j < S - 1; j++) {
+      const a = i * S + j, b = i * S + j + 1, c = (i + 1) * S + j + 1, d = (i + 1) * S + j;
+      index[ii++] = a; index[ii++] = b; index[ii++] = c;
+      index[ii++] = a; index[ii++] = c; index[ii++] = d;
+    }
+  }
+  /* плоский срез (хорда) — дно каната, которое и лежит на поверхности */
+  for (let i = 0; i < n - 1; i++) {
+    const a = i * S, b = (i + 1) * S, c = (i + 1) * S + (S - 1), d = i * S + (S - 1);
+    index[ii++] = a; index[ii++] = b; index[ii++] = c;
+    index[ii++] = a; index[ii++] = c; index[ii++] = d;
+  }
+  /* торцы: веер из крайней точки хорды — сечение выпуклое, центр не нужен,
+     а хорда остаётся одним ребром, общим с дном (иначе висят швы) */
+  for (let j = 1; j < S - 1; j++) {
+    index[ii++] = 0; index[ii++] = j + 1; index[ii++] = j;                    // начало: нормаль −t
+  }
+  const base = (n - 1) * S;
+  for (let j = 1; j < S - 1; j++) {
+    index[ii++] = base; index[ii++] = base + j; index[ii++] = base + j + 1;   // конец: нормаль +t
+  }
+  return { positions, index, rings: n, sides: S, verts, radius: R, off,
+    cut: 180 - 2 * (a0 * 180) / Math.PI,        // сколько градусов сечения осталось
+    half: off === 0 };
+}
+
 /** габарит трубки — для отчётов и тестов */
 export function tubeStats(t) {
   let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
