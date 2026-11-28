@@ -2853,6 +2853,11 @@ export function initSculpt(opts) {
     if (!rp || rp.absorbed) { syncInfo('впаивать нечего: сначала проведите канат по кузову'); return null; }
     const t0 = performance.now();
     const R = rp.radius;
+    /* Впаивание — это след каната в кузове, канат исчезает:
+         'groove' (по умолчанию) — канавка: канат вдавлен, остаётся только
+                    полость его нижней половины (глубина R, ширина 2R);
+         'ridge'             — ребро: кожа поднимается на полуцилиндр R. */
+    const ridge = opts.mode === 'ridge';
     const path = rp.path.slice();
     /* нормали без выбросов: у кромки панели одиночная боковая нормаль уводила
        ребро за край (проверено стендом rope_half — 11 мм вместо 2.5) */
@@ -2861,7 +2866,7 @@ export function initSculpt(opts) {
     const Q = { 1: { spd: 3.5, limit: 20000, snap: false },
                 2: { spd: 5, limit: 80000, snap: true },
                 3: { spd: 6.5, limit: 160000, snap: true } }[ropeQual] || { spd: 5, limit: 80000, snap: true };
-    const st = carvePath(path, R, R, { sign: 1, limit: Q.limit, spd: opts.spd || Q.spd, ringIters: opts.ringIters === undefined ? 3 : opts.ringIters,
+    const st = carvePath(path, R, R, { sign: ridge ? 1 : -1, limit: Q.limit, spd: opts.spd || Q.spd, ringIters: opts.ringIters === undefined ? 3 : opts.ringIters,
       snap: opts.snap === undefined ? Q.snap : opts.snap, red: opts.red === undefined ? true : opts.red,
       minDot: opts.minDot, slab: opts.slab === undefined ? R * 0.75 : opts.slab });
     smoothNormalsNear(path, 4 * R, 6);
@@ -2872,13 +2877,17 @@ export function initSculpt(opts) {
     ropeSel = pickRope();
     tintRopes();
     syncRopeRow();
-    const out = { rope: name, width: R * 2, height: st.maxd, len: L, moved: st.moved,
-      added: st.added, secs, vertsAfter: vk };
+    const out = { rope: name, mode: ridge ? 'ridge' : 'groove', width: R * 2, depth: st.maxd,
+      len: L, moved: st.moved, added: st.added, secs, vertsAfter: vk };
     rp.fuse = out;
-    syncInfo(`◍ канат «${name}» впаян в кузов: ребро ${(st.maxd / U).toFixed(2)} мм высотой, ` +
-      `${(R * 2 / U).toFixed(2)} мм шириной, длина ${(L / U).toFixed(1)} мм · ` +
-      `новых точек ${st.added}, поднято ${st.moved} · ${secs.toFixed(2)} с · ` +
-      `нижней половины каната нет — её не существует`);
+    syncInfo(ridge
+      ? `◍ канат «${name}» впаян ребром: ребро ${(st.maxd / U).toFixed(2)} мм высотой, ` +
+        `${(R * 2 / U).toFixed(2)} мм шириной, длина ${(L / U).toFixed(1)} мм · ` +
+        `новых точек ${st.added}, поднято ${st.moved} · ${secs.toFixed(2)} с`
+      : `◍ канат «${name}» впаян в кузов: осталась канавка ${(R * 2 / U).toFixed(2)} мм шириной и ` +
+        `${(st.maxd / U).toFixed(2)} мм глубиной, длина ${(L / U).toFixed(1)} мм · ` +
+        `новых точек ${st.added}, вдавлено ${st.moved} · ${secs.toFixed(2)} с · ` +
+        `самого каната нет — он весь ушёл в кузов, след остался`);
     return out;
   }
 
@@ -4341,7 +4350,7 @@ export function initSculpt(opts) {
       : 'канат: снова прокладывается линией по кузову');
   });
   const btnFuse = $('sc-fuse');
-  if (btnFuse) btnFuse.addEventListener('click', () => fuseRope());
+  if (btnFuse) btnFuse.addEventListener('click', (e) => fuseRope(undefined, { mode: e && e.shiftKey ? 'ridge' : 'groove' }));
   const btnReset = $('sc-rope-reset');
   if (btnReset) btnReset.addEventListener('click', () => ropeReset());
   const ropeQEl = $('sc-ropeq');

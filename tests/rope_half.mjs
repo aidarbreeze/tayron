@@ -88,20 +88,6 @@ const strokeSurface = (x0, z0, x1, z1, cnt = 20, stopAtEdge = false) => {
   (canvas._ev.pointerup || []).forEach(f => f(ev(sp[sp.length - 1][0], sp[sp.length - 1][1])));
 };
 const tool = (t) => { sculpt.setTool(null); if (t) sculpt.setTool(t); };
-/* исходный кузов отдельной копией — чтобы мерить «до» даже после впаивания */
-let rawMesh = null;
-const downRaw = (x, z) => {
-  if (!rawMesh) {
-    const g2 = new THREE.BufferGeometry();
-    g2.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(raw.pos.flat()), 3));
-    g2.setIndex(new THREE.BufferAttribute(Uint32Array.from(raw.idx), 1));
-    rawMesh = new THREE.Mesh(g2, material);
-    rawMesh.updateMatrixWorld(true);
-  }
-  const r = new THREE.Raycaster(new THREE.Vector3(x, 600, z), new THREE.Vector3(0, -1, 0), 0, 4000);
-  const h = r.intersectObject(rawMesh, false);
-  return h.length ? h[0].point.y : null;
-};
 const reset = () => {
   els['sc-clear'].click(); sculpt.setTool(null);
   while (sculpt.ropeCount) sculpt.removeRope();      // канаты прошлых блоков стенда не мешают
@@ -132,36 +118,6 @@ const badEdges = (idx) => {
   }
   let b = 0; for (const v of m.values()) if (v !== 2) b++;
   return b;
-};
-
-/* сечение плоскостью x = X0: верхняя граница поверхности для каждого z */
-const sectionTop = (pos, idx, X0, zLo, zHi, n = 41) => {
-  const segs = [];
-  for (let i = 0; i < idx.length; i += 3) {
-    const v = [idx[i], idx[i + 1], idx[i + 2]].map(k => [pos[k * 3], pos[k * 3 + 1], pos[k * 3 + 2]]);
-    const pts = [];
-    for (let e = 0; e < 3; e++) {
-      const A = v[e], B = v[(e + 1) % 3];
-      if ((A[0] - X0) * (B[0] - X0) > 0) continue;
-      const t = Math.abs(B[0] - A[0]) < 1e-12 ? 0 : (X0 - A[0]) / (B[0] - A[0]);
-      if (t < 0 || t > 1) continue;
-      pts.push([A[2] + (B[2] - A[2]) * t, A[1] + (B[1] - A[1]) * t]);
-    }
-    if (pts.length === 2) segs.push(pts);
-  }
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const z = zLo + ((zHi - zLo) * i) / (n - 1);
-    let best = null;
-    for (const [A, B] of segs) {
-      const z1 = Math.min(A[0], B[0]), z2 = Math.max(A[0], B[0]);
-      if (z < z1 || z > z2 || Math.abs(B[0] - A[0]) < 1e-9) continue;
-      const y = A[1] + (B[1] - A[1]) * ((z - A[0]) / (B[0] - A[0]));
-      if (best === null || y > best) best = y;
-    }
-    out.push({ z, y: best });
-  }
-  return out;
 };
 
 /* ---------- 1. канат ставится вполовину ---------- */
@@ -242,38 +198,9 @@ let raise0 = 0;
     !!rope2 && rope2.off === 0,
     `«${rope2 && rope2.name}», длина ${(len2 / U).toFixed(1)} мм, точек ${rope2 ? rope2.path.length : 0}`);
 
-  const X0 = 290, K = 6, zLo = z0 - K * R2 / U, zHi = z0 + K * R2 / U;
-  const bodyBeforeFuse = snap();
-  const secBefore = sectionTop(Float32Array.from(bodyBeforeFuse), Uint32Array.from(I()), X0, zLo, zHi, 25);
-
-  const t0 = Date.now();
-  const fused = sculpt.fuseRope();
-  const ms = Date.now() - t0;
-  let raise = 0, over = 0;
-  for (let i = 0; i < bodyBeforeFuse.length; i += 3) {
-    const d = Math.hypot(P()[i] - bodyBeforeFuse[i], P()[i + 1] - bodyBeforeFuse[i + 1], P()[i + 2] - bodyBeforeFuse[i + 2]);
-    if (d > 1e-6) over++;
-    if (d > raise) raise = d;
-  }
-  raise0 = raise;
-  const c = chk();
-  console.log(`впаивание: ${ms} мс, поднято ${over} вершин, максимум ${(raise / U).toFixed(2)} мм, ` +
-    `+${fused && fused.added} точек, граней ${I().length / 3}\n`);
-  it('7. ребро поднялось ровно на радиус каната',
-    Math.abs(raise / U - R2 / U) < 0.1,
-    `${(raise / U).toFixed(2)} мм при радиусе ${(R2 / U).toFixed(2)} мм, поднято ${over} вершин, ${ms} мс`);
-  it('8. после впаивания кузов цел: дыр, неманифолдных и вырожденных нет',
-    c.openEdges === 0 && c.nonManifold === 0 && c.degenerate === 0,
-    `дыр ${c.openEdges}, неманиф ${c.nonManifold}, вырожд ${c.degenerate}, граней ${I().length / 3} (+${(I().length / 3) - f0})`);
-  it('9. каната как отдельного объекта больше нет — он часть кузова',
-    sculpt.ropeCount === 0 && sculpt.ropeAbsorbed === 1 && !(mesh.parent.children || []).includes(tubeObj),
-    `канатов в сцене ${sculpt.ropeCount}, впаяно ${sculpt.ropeAbsorbed}`);
-
-  /* Профиль вала — по самому полю деформации: для каждой сдвинутой вершины
-     берём поперечное смещение от оси каната и подъём. Никаких лучей и сечений —
-     меряем ровно то, что сделал код. */
+  /* ось каната и поперечное направление — по самому пути */
   const pth = rope2.path, pnr = rope2.nrms;
-  const T = [], B = [];
+  const B = [];
   for (let i = 0; i < pth.length; i++) {
     const a = pth[Math.max(0, i - 1)], b = pth[Math.min(pth.length - 1, i + 1)];
     const tx = b[0] - a[0], ty = b[1] - a[1], tz = b[2] - a[2];
@@ -282,68 +209,96 @@ let raise0 = 0;
     const nn = pnr[Math.min(pnr.length - 1, i)] || [0, 1, 0];
     const bx = tt[1] * nn[2] - tt[2] * nn[1], by = tt[2] * nn[0] - tt[0] * nn[2], bz = tt[0] * nn[1] - tt[1] * nn[0];
     const bl = Math.hypot(bx, by, bz) || 1;
-    T.push(tt); B.push([bx / bl, by / bl, bz / bl]);
+    B.push([bx / bl, by / bl, bz / bl]);
   }
-  const nb = 17, tLo = -(R2 / U) * 1.8, tHi = (R2 / U) * 1.8;   // поперечные бины, мм
+  const near = (o, arr) => {                    // ближайшая точка пути
+    let bk = 0, bd = Infinity;
+    for (let k = 0; k < pth.length; k++) {
+      const d = (pth[k][0] - arr[o]) ** 2 + (pth[k][1] - arr[o + 1]) ** 2 + (pth[k][2] - arr[o + 2]) ** 2;
+      if (d < bd) { bd = d; bk = k; }
+    }
+    return bk;
+  };
+
+  const bodyBeforeFuse = snap();
+  const t0 = Date.now();
+  const fused = sculpt.fuseRope();               // по умолчанию — именно канавка
+  const ms = Date.now() - t0;
+  let maxDown = 0, up = 0, moved = 0;
+  for (let v = 0; v < bodyBeforeFuse.length / 3; v++) {
+    const o = v * 3;
+    const dx = P()[o] - bodyBeforeFuse[o], dy = P()[o + 1] - bodyBeforeFuse[o + 1], dz = P()[o + 2] - bodyBeforeFuse[o + 2];
+    if (Math.hypot(dx, dy, dz) < 1e-6) continue;
+    moved++;
+    const bk = near(o, bodyBeforeFuse), nr = pnr[Math.min(pnr.length - 1, bk)];
+    const h = (dx * nr[0] + dy * nr[1] + dz * nr[2]) / U;   // мм: минус — вдавлено
+    if (h > 0.3) up++;
+    if (-h > maxDown) maxDown = -h;
+  }
+  raise0 = maxDown * U;
+  const c = chk();
+  console.log(`впаивание канавкой: ${ms} мс, вдавлено ${moved} вершин, глубина ${maxDown.toFixed(2)} мм, ` +
+    `+${fused && fused.added} точек, граней ${I().length / 3}\n`);
+  it('7. канавка ровно в радиус: кожа вдавлена на R, вспучивания нет',
+    Math.abs(maxDown - R2 / U) < 0.1 && up === 0 && moved > 0,
+    `глубина ${maxDown.toFixed(2)} мм при радиусе ${(R2 / U).toFixed(2)} мм, вдавлено ${moved} вершин, ` +
+    `вспучивание больше 0.3 мм ${up}, ${ms} мс`);
+  it('8. после впаивания кузов цел: дыр, неманифолдных и вырожденных нет',
+    c.openEdges === 0 && c.nonManifold === 0 && c.degenerate === 0,
+    `дыр ${c.openEdges}, неманиф ${c.nonManifold}, вырожд ${c.degenerate}, граней ${I().length / 3} (+${(I().length / 3) - f0})`);
+  it('9. каната в сцене нет — остался только его след в кузове',
+    sculpt.ropeCount === 0 && sculpt.ropeAbsorbed === 1 && !(mesh.parent.children || []).includes(tubeObj),
+    `канатов в сцене ${sculpt.ropeCount}, впаяно ${sculpt.ropeAbsorbed}`);
+
+  /* Профиль канавки — по самому полю деформации: поперечное смещение ↔ глубина */
+  const nb = 17, tLo = -(R2 / U) * 1.8, tHi = (R2 / U) * 1.8;
   const prof = new Array(nb).fill(null);
   for (let v = 0; v < bodyBeforeFuse.length / 3; v++) {
     const o = v * 3;
     const dx = P()[o] - bodyBeforeFuse[o], dy = P()[o + 1] - bodyBeforeFuse[o + 1], dz = P()[o + 2] - bodyBeforeFuse[o + 2];
-    const dl = Math.hypot(dx, dy, dz);
-    if (dl < 1e-6) continue;
-    let bk = 0, bd = Infinity;
-    for (let k = 0; k < pth.length; k++) {
-      const d = (pth[k][0] - bodyBeforeFuse[o]) ** 2 + (pth[k][1] - bodyBeforeFuse[o + 1]) ** 2 + (pth[k][2] - bodyBeforeFuse[o + 2]) ** 2;
-      if (d < bd) { bd = d; bk = k; }
-    }
+    if (Math.hypot(dx, dy, dz) < 1e-6) continue;
+    const bk = near(o, bodyBeforeFuse);
     const qx = bodyBeforeFuse[o] - pth[bk][0], qy = bodyBeforeFuse[o + 1] - pth[bk][1], qz = bodyBeforeFuse[o + 2] - pth[bk][2];
-    const t = ((qx * B[bk][0] + qy * B[bk][1] + qz * B[bk][2]) / U);   // мм поперёк
-    const h = ((dx * pnr[bk][0] + dy * pnr[bk][1] + dz * pnr[bk][2]) / U); // мм подъёма
+    const t = (qx * B[bk][0] + qy * B[bk][1] + qz * B[bk][2]) / U;
+    const h = (dx * pnr[bk][0] + dy * pnr[bk][1] + dz * pnr[bk][2]) / U;
     const bi = Math.round(((t - tLo) / (tHi - tLo)) * (nb - 1));
     if (bi < 0 || bi >= nb) continue;
-    if (prof[bi] === null || h > prof[bi]) prof[bi] = h;
+    if (prof[bi] === null || h < prof[bi]) prof[bi] = h;    // глубже = отрицательнее
   }
   const ideal = Array.from({ length: nb }, (_, i) => {
     const t = tLo + ((tHi - tLo) * i) / (nb - 1);
     const u = Math.abs(t) / (R2 / U);
-    return u >= 1 ? 0 : (R2 / U) * Math.sqrt(1 - u * u);
+    return u >= 1 ? 0 : -(R2 / U) * Math.sqrt(1 - u * u);
   });
-  const peak = Math.max(...prof.filter(v => v !== null));
+  const peak = -Math.min(...prof.filter(v => v !== null));
   let worst = 0, seen = 0;
   prof.forEach((v, i) => { if (v === null) return; seen++; worst = Math.max(worst, Math.abs(v - ideal[i])); });
-  prof.forEach((v, i) => { if (v === null) worst = Math.max(worst, ideal[i]); });   // пусто = не двигалось = 0
-  it('10. профиль поперёк — полукруг радиуса R, к краям сходит в ноль',
+  prof.forEach((v, i) => { if (v === null) worst = Math.max(worst, Math.abs(ideal[i])); });
+  it('10. профиль поперёк — полукруг вниз на R, к краям сходит в ноль',
     peak > 0.9 * R2 / U && worst < 0.25 * R2 / U && seen >= nb - 6,
-    `поперёк ${tLo.toFixed(1)}…${tHi.toFixed(1)} мм, вершина ${peak.toFixed(2)} мм, ` +
+    `поперёк ${tLo.toFixed(1)}…${tHi.toFixed(1)} мм, глубина ${peak.toFixed(2)} мм, ` +
     `отклонение от полукруга до ${worst.toFixed(2)} мм · ` +
     `замер ${prof.map(v => (v === null ? '—' : v.toFixed(2))).join(' ')} · ` +
     `полукруг ${ideal.map(v => v.toFixed(2)).join(' ')}`);
 
-  /* коридор: деформация только вокруг каната, только наружу и не дальше R */
+  /* коридор: деформация только вокруг каната, только вниз и не глубже R */
   {
-    let outside = 0, down = 0, tooFar = 0, moved = 0, minH = 1e9;
+    let outside = 0, dirt = 0, deeper = 0;
     for (let v = 0; v < bodyBeforeFuse.length / 3; v++) {
       const o = v * 3;
       const dx = P()[o] - bodyBeforeFuse[o], dy = P()[o + 1] - bodyBeforeFuse[o + 1], dz = P()[o + 2] - bodyBeforeFuse[o + 2];
-      const dl = Math.hypot(dx, dy, dz);
-      if (dl < 1e-6) continue;
-      moved++;
-      if (dl > 1.02 * R2) tooFar++;
-      let bk = 0, bd = Infinity;
-      for (let i = 0; i < pth.length; i++) {
-        const d = (pth[i][0] - bodyBeforeFuse[o]) ** 2 + (pth[i][1] - bodyBeforeFuse[o + 1]) ** 2 + (pth[i][2] - bodyBeforeFuse[o + 2]) ** 2;
-        if (d < bd) { bd = d; bk = i; }
-      }
+      if (Math.hypot(dx, dy, dz) < 1e-6) continue;
+      const bk = near(o, bodyBeforeFuse);
       const qx = bodyBeforeFuse[o] - pth[bk][0], qy = bodyBeforeFuse[o + 1] - pth[bk][1], qz = bodyBeforeFuse[o + 2] - pth[bk][2];
       const t = (qx * B[bk][0] + qy * B[bk][1] + qz * B[bk][2]) / U;
       if (Math.abs(t) > 1.5 * (R2 / U)) outside++;
       const h = (dx * pnr[bk][0] + dy * pnr[bk][1] + dz * pnr[bk][2]) / U;
-      if (h < minH) minH = h;
-      if (h < -0.3) down++;          // допускаем «провал» не больше 12 % радиуса
+      if (h > 0.3) dirt++;                       // вспучивание не больше 12 % радиуса
+      if (-h > 1.02 * (R2 / U)) deeper++;
     }
-    it('11. деформация только вокруг каната: коридор 1.5R, не вниз, не дальше R',
-      outside === 0 && down === 0 && tooFar === 0 && moved > 0,
-      `сдвинуто ${moved} вершин, вне коридора ${outside}, провал больше 0.3 мм ${down} (минимум ${minH.toFixed(3)} мм), дальше радиуса ${tooFar}`);
+    it('11. деформация только вокруг каната: коридор 1.5R, не глубже R, без вспучивания',
+      outside === 0 && dirt === 0 && deeper === 0,
+      `вне коридора ${outside}, вспучивание больше 0.3 мм ${dirt}, глубже радиуса ${deeper}`);
   }
 
   /* ---------- 3. отмена/возврат ---------- */
@@ -352,9 +307,9 @@ let raise0 = 0;
     maxDiff(bodyBeforeFuse, P()) === 0 && sculpt.ropeCount === 1 && sculpt.ropeAbsorbed === 0,
     `сдвиг ${maxDiff(bodyBeforeFuse, P()).toExponential(1)}, канатов ${sculpt.ropeCount}, впаяно ${sculpt.ropeAbsorbed}`);
   key('z', { ctrlKey: true, shiftKey: true });
-  it('13. Ctrl+Shift+Z впаивает обратно, ребро на месте',
+  it('13. Ctrl+Shift+Z впаивает обратно, канавка на месте',
     sculpt.ropeAbsorbed === 1 && maxDiff(bodyBeforeFuse, P()) > raise0 * 0.9,
-    `впаяно ${sculpt.ropeAbsorbed}, подъём ${(maxDiff(bodyBeforeFuse, P()) / U).toFixed(2)} мм`);
+    `впаяно ${sculpt.ropeAbsorbed}, глубина ${(maxDiff(bodyBeforeFuse, P()) / U).toFixed(2)} мм`);
 }
 
 /* ---------- 4. кромка: канат доходит до края кузова ---------- */
@@ -375,9 +330,89 @@ let raise0 = 0;
     for (const q of path2) bd = Math.min(bd, (q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2 + (q[2] - p[2]) ** 2);
     if (Math.sqrt(bd) > 4 * rp2.radius) far++;
   }
-  it('14. у кромки ребро обрывается само: сетка цела, дальние точки не тронуты',
+  it('14. у кромки канавка обрывается сама: сетка цела, дальние точки не тронуты',
     c.openEdges === 0 && c.nonManifold === 0 && far === 0,
     `дыр ${c.openEdges}, неманиф ${c.nonManifold}, точек дальше 4R от каната ${far}, длина каната ${(rp2.len / U).toFixed(1)} мм`);
+}
+
+/* ---------- 5. режим «ребро» (Shift): кожа поднимается, а не вдавливается ---------- */
+{
+  reset();
+  const R2 = 2.5 * U, z0 = 100, posArr = P(), nrmArr = geo.attributes.normal.array;
+  const pts = [], nrs = [];
+  for (let k = 0; k <= 30; k++) {
+    const x = 200 + (180 * k) / 30;
+    const y = down(x, z0)[1];
+    pts.push([x, y, z0]);
+    let bi = 0, bd = Infinity;
+    for (let v = 0; v < posArr.length; v += 3) {
+      const d = (posArr[v] - x) ** 2 + (posArr[v + 1] - y) ** 2 + (posArr[v + 2] - z0) ** 2;
+      if (d < bd) { bd = d; bi = v; }
+    }
+    nrs.push([nrmArr[bi], nrmArr[bi + 1], nrmArr[bi + 2]]);
+  }
+  const rp3 = sculpt.addRope(pts, nrs, 2.5);
+  const before = snap();
+  const res = sculpt.fuseRope(rp3.i, { mode: 'ridge' });
+  let upMax = 0, sunk = 0;
+  for (let v = 0; v < before.length / 3; v++) {
+    const o = v * 3;
+    const dx = P()[o] - before[o], dy = P()[o + 1] - before[o + 1], dz = P()[o + 2] - before[o + 2];
+    const dl = Math.hypot(dx, dy, dz);
+    if (dl < 1e-6) continue;
+    let bk = 0, bd = Infinity;
+    for (let i = 0; i < rp3.path.length; i++) {
+      const d = (rp3.path[i][0] - before[o]) ** 2 + (rp3.path[i][1] - before[o + 1]) ** 2 + (rp3.path[i][2] - before[o + 2]) ** 2;
+      if (d < bd) { bd = d; bk = i; }
+    }
+    const nr = nrs[Math.min(nrs.length - 1, bk)];
+    const h = (dx * nr[0] + dy * nr[1] + dz * nr[2]) / U;
+    if (h > upMax) upMax = h;
+    if (h < -0.3) sunk++;
+  }
+  it('15. Shift (режим «ребро») поднимает кожу на радиус — канавки не остаётся',
+    !!res && res.mode === 'ridge' && Math.abs(upMax - R2 / U) < 0.1 && sunk === 0,
+    `режим ${res && res.mode}, подъём ${upMax.toFixed(2)} мм, вдавлено больше 0.3 мм ${sunk}, ` +
+    `канатов в сцене ${sculpt.ropeCount}`);
+}
+
+/* ---------- 6. кнопка «◍ Впаять» без Shift — именно канавка ---------- */
+{
+  reset();
+  const z0 = 100, posArr = P(), nrmArr = geo.attributes.normal.array;
+  const pts = [], nrs = [];
+  for (let k = 0; k <= 30; k++) {
+    const x = 200 + (180 * k) / 30;
+    const y = down(x, z0)[1];
+    pts.push([x, y, z0]);
+    let bi = 0, bd = Infinity;
+    for (let v = 0; v < posArr.length; v += 3) {
+      const d = (posArr[v] - x) ** 2 + (posArr[v + 1] - y) ** 2 + (posArr[v + 2] - z0) ** 2;
+      if (d < bd) { bd = d; bi = v; }
+    }
+    nrs.push([nrmArr[bi], nrmArr[bi + 1], nrmArr[bi + 2]]);
+  }
+  sculpt.addRope(pts, nrs, 2.5);
+  const before = snap(), abs0 = sculpt.ropeAbsorbed;
+  els['sc-fuse'].click();
+  let deepest = 0, up = 0;
+  for (let v = 0; v < before.length / 3; v++) {
+    const o = v * 3;
+    const dx = P()[o] - before[o], dy = P()[o + 1] - before[o + 1], dz = P()[o + 2] - before[o + 2];
+    if (Math.hypot(dx, dy, dz) < 1e-6) continue;
+    let bk = 0, bd = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = (pts[i][0] - before[o]) ** 2 + (pts[i][1] - before[o + 1]) ** 2 + (pts[i][2] - before[o + 2]) ** 2;
+      if (d < bd) { bd = d; bk = i; }
+    }
+    const nr = nrs[bk];
+    const h = (dx * nr[0] + dy * nr[1] + dz * nr[2]) / U;
+    if (-h > deepest) deepest = -h;
+    if (h > 0.3) up++;
+  }
+  it('16. кнопка «◍ Впаять» без Shift оставляет канавку, а не ребро',
+    sculpt.ropeAbsorbed === abs0 + 1 && sculpt.ropeCount === 0 && deepest > 2.2 && up === 0,
+    `впаяно всего ${sculpt.ropeAbsorbed}, канатов в сцене ${sculpt.ropeCount}, глубина ${deepest.toFixed(2)} мм, вспучивание больше 0.3 мм ${up}`);
 }
 
 console.log(`\nИТОГ «полуканат»: ${n - bad} из ${n} проверок зелёные, провалов ${bad}`);
