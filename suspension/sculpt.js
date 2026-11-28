@@ -2848,46 +2848,104 @@ export function initSculpt(opts) {
       (зеркало «Прожечь»), сам канат уходит из сцены: отдельного объекта
       больше нет, есть кузов с полукруглым ребром. Всё, что было ниже
       поверхности, не появляется вовсе — этих треугольников не существует. */
+  /** Влить полуканат в кузов как геометрию — без единого сдвига кожи.
+      Кузов при этом не деформируется: его вершины и грани остаются байт в байт,
+      к ним добавляются вершины и грани полуканата (нижней половины не
+      существует — она не создаётся вовсе). Так «половина каната» становится
+      частью модели: один меш, один файл, каната как объекта сцены больше нет. */
+  function weldHalfRope(rp) {
+    const t = rp.tube || ropeTube(rp);
+    const tp = t.positions, ti = t.index;
+    const nNew = tp.length / 3;
+    if (!nNew || !ti.length) return { added: 0, verts: 0, tris: 0 };
+    const nc0 = count, oldCol = col;
+    const newSrc = new Float32Array((count + nNew) * 3);
+    newSrc.set(src.subarray(0, count * 3));
+    newSrc.set(tp, count * 3);
+    count += nNew;
+    applySrc(newSrc);
+    col = new Float32Array(count * 3).fill(1);
+    col.set(oldCol.subarray(0, Math.min(oldCol.length, col.length)));
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    const ni = new Uint32Array(liveIndex.length + ti.length);
+    ni.set(liveIndex);
+    for (let k = 0; k < ti.length; k++) ni[liveIndex.length + k] = ti[k] + nc0;
+    setIndex(ni);
+    /* топология: пересобираем по новой сетке, но исходные координаты узлов
+       (pos0 — для «Сбросить») сохраняем, иначе сброс утащил бы старый кузов */
+    const keep0 = pos0.slice();
+    topo = buildTopology(src, liveIndex);
+    resizeNodeArrays(topo.vk);
+    vk = topo.vk; canon = topo.canon;
+    pos0 = new Float32Array(vk * 3);
+    pos0.set(keep0.subarray(0, Math.min(keep0.length, pos0.length)));
+    for (let v = 0; v < count; v++) {
+      const n = canon[v] * 3, o = v * 3;
+      pos[n] = src[o]; pos[n + 1] = src[o + 1]; pos[n + 2] = src[o + 2];
+      if (v >= nc0) { pos0[n] = src[o]; pos0[n + 1] = src[o + 1]; pos0[n + 2] = src[o + 2]; }
+    }
+    const nr = new Int32Array(vk), seen = new Uint8Array(vk);
+    for (let v = 0; v < count; v++) {
+      const c = canon[v];
+      if (!seen[c]) { seen[c] = 1; nr[c] = v; }
+    }
+    topo.canon = canon; topo.rep = nr; topo.vk = vk; topo.count = count; topo.pos0 = pos0;
+    topoDirty = false; nrm = null; hitCache = null;
+    flush();
+    return { added: nNew, verts: nNew, tris: ti.length / 3, rings: t.rings };
+  }
+
   function fuseRope(i = ropeSel, opts = {}) {
     const rp = ropes[i];
     if (!rp || rp.absorbed) { syncInfo('впаивать нечего: сначала проведите канат по кузову'); return null; }
     const t0 = performance.now();
     const R = rp.radius;
-    /* Впаивание — это след каната в кузове, канат исчезает:
-         'groove' (по умолчанию) — канавка: канат вдавлен, остаётся только
-                    полость его нижней половины (глубина R, ширина 2R);
-         'ridge'             — ребро: кожа поднимается на полуцилиндр R. */
-    const ridge = opts.mode === 'ridge';
-    const path = rp.path.slice();
-    /* нормали без выбросов: у кромки панели одиночная боковая нормаль уводила
-       ребро за край (проверено стендом rope_half — 11 мм вместо 2.5) */
-    path.nrms = opts.rawNormals ? rp.nrms : cleanNormals(rp.path, rp.nrms, opts.win || 3, opts.deg || 35);
+    /* Как канат становится частью модели:
+         'weld' (по умолчанию) — полуканат вливается в кузов как есть: кожа не
+                    двигается вовсе, кузов получает грани полуканата;
+         'groove'  — кожа вдавливается, остаётся канавка (след, самого каната нет);
+         'ridge'   — кожа поднимается, остаётся выпуклое ребро. */
+    const mode = opts.mode === 'groove' || opts.mode === 'ridge' ? opts.mode : 'weld';
     pushHist();                                     // отмена вернёт и кузов, и канат
-    const Q = { 1: { spd: 3.5, limit: 20000, snap: false },
-                2: { spd: 5, limit: 80000, snap: true },
-                3: { spd: 6.5, limit: 160000, snap: true } }[ropeQual] || { spd: 5, limit: 80000, snap: true };
-    const st = carvePath(path, R, R, { sign: ridge ? 1 : -1, limit: Q.limit, spd: opts.spd || Q.spd, ringIters: opts.ringIters === undefined ? 3 : opts.ringIters,
-      snap: opts.snap === undefined ? Q.snap : opts.snap, red: opts.red === undefined ? true : opts.red,
-      minDot: opts.minDot, slab: opts.slab === undefined ? R * 0.75 : opts.slab });
-    smoothNormalsNear(path, 4 * R, 6);
-    const L = pathLen(path);
+    let st = null, welded = null;
+    if (mode === 'weld') {
+      welded = weldHalfRope(rp);
+    } else {
+      const path = rp.path.slice();
+      /* нормали без выбросов: у кромки панели одиночная боковая нормаль уводила
+         след за край (проверено стендом rope_half — 11 мм вместо 2.5) */
+      path.nrms = opts.rawNormals ? rp.nrms : cleanNormals(rp.path, rp.nrms, opts.win || 3, opts.deg || 35);
+      const Q = { 1: { spd: 3.5, limit: 20000, snap: false },
+                  2: { spd: 5, limit: 80000, snap: true },
+                  3: { spd: 6.5, limit: 160000, snap: true } }[ropeQual] || { spd: 5, limit: 80000, snap: true };
+      st = carvePath(path, R, R, { sign: mode === 'ridge' ? 1 : -1, limit: Q.limit, spd: opts.spd || Q.spd,
+        ringIters: opts.ringIters === undefined ? 3 : opts.ringIters,
+        snap: opts.snap === undefined ? Q.snap : opts.snap, red: opts.red === undefined ? true : opts.red,
+        minDot: opts.minDot, slab: opts.slab === undefined ? R * 0.75 : opts.slab });
+      smoothNormalsNear(path, 4 * R, 6);
+    }
+    const L = pathLen(rp.path);
     const secs = (performance.now() - t0) / 1000;
     const name = rp.name;
     setAbsorbed(rp, true);
     ropeSel = pickRope();
     tintRopes();
     syncRopeRow();
-    const out = { rope: name, mode: ridge ? 'ridge' : 'groove', width: R * 2, depth: st.maxd,
-      len: L, moved: st.moved, added: st.added, secs, vertsAfter: vk };
+    const out = { rope: name, mode, width: R * 2, depth: st ? st.maxd : 0, height: st ? st.maxd : 0,
+      len: L, moved: st ? st.moved : welded.verts, added: st ? st.added : welded.verts,
+      tris: welded ? welded.tris : 0, secs, vertsAfter: vk };
     rp.fuse = out;
-    syncInfo(ridge
-      ? `◍ канат «${name}» впаян ребром: ребро ${(st.maxd / U).toFixed(2)} мм высотой, ` +
-        `${(R * 2 / U).toFixed(2)} мм шириной, длина ${(L / U).toFixed(1)} мм · ` +
-        `новых точек ${st.added}, поднято ${st.moved} · ${secs.toFixed(2)} с`
-      : `◍ канат «${name}» впаян в кузов: осталась канавка ${(R * 2 / U).toFixed(2)} мм шириной и ` +
-        `${(st.maxd / U).toFixed(2)} мм глубиной, длина ${(L / U).toFixed(1)} мм · ` +
-        `новых точек ${st.added}, вдавлено ${st.moved} · ${secs.toFixed(2)} с · ` +
-        `самого каната нет — он весь ушёл в кузов, след остался`);
+    syncInfo(mode === 'weld'
+      ? `◍ канат «${name}» стал частью кузова: полуканат влит в сетку как есть — ` +
+        `+${welded.verts} вершин и +${welded.tris} граней, кожа не сдвинулась ни на йоту · ` +
+        `длина ${(L / U).toFixed(1)} мм, ${(R * 2 / U).toFixed(2)} мм шириной · ${secs.toFixed(2)} с`
+      : mode === 'ridge'
+        ? `◍ канат «${name}» впаян ребром: ребро ${(st.maxd / U).toFixed(2)} мм высотой, ` +
+          `${(R * 2 / U).toFixed(2)} мм шириной, длина ${(L / U).toFixed(1)} мм · ` +
+          `новых точек ${st.added}, поднято ${st.moved} · ${secs.toFixed(2)} с`
+        : `◍ канат «${name}» впаян в кузов: осталась канавка ${(R * 2 / U).toFixed(2)} мм шириной и ` +
+          `${(st.maxd / U).toFixed(2)} мм глубиной, длина ${(L / U).toFixed(1)} мм · ` +
+          `новых точек ${st.added}, вдавлено ${st.moved} · ${secs.toFixed(2)} с`);
     return out;
   }
 
@@ -4350,7 +4408,7 @@ export function initSculpt(opts) {
       : 'канат: снова прокладывается линией по кузову');
   });
   const btnFuse = $('sc-fuse');
-  if (btnFuse) btnFuse.addEventListener('click', (e) => fuseRope(undefined, { mode: e && e.shiftKey ? 'ridge' : 'groove' }));
+  if (btnFuse) btnFuse.addEventListener('click', (e) => fuseRope(undefined, { mode: e && e.shiftKey ? 'groove' : 'weld' }));
   const btnReset = $('sc-rope-reset');
   if (btnReset) btnReset.addEventListener('click', () => ropeReset());
   const ropeQEl = $('sc-ropeq');

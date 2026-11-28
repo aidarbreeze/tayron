@@ -198,118 +198,61 @@ let raise0 = 0;
     !!rope2 && rope2.off === 0,
     `«${rope2 && rope2.name}», длина ${(len2 / U).toFixed(1)} мм, точек ${rope2 ? rope2.path.length : 0}`);
 
-  /* ось каната и поперечное направление — по самому пути */
-  const pth = rope2.path, pnr = rope2.nrms;
-  const B = [];
-  for (let i = 0; i < pth.length; i++) {
-    const a = pth[Math.max(0, i - 1)], b = pth[Math.min(pth.length - 1, i + 1)];
-    const tx = b[0] - a[0], ty = b[1] - a[1], tz = b[2] - a[2];
-    const tl = Math.hypot(tx, ty, tz) || 1;
-    const tt = [tx / tl, ty / tl, tz / tl];
-    const nn = pnr[Math.min(pnr.length - 1, i)] || [0, 1, 0];
-    const bx = tt[1] * nn[2] - tt[2] * nn[1], by = tt[2] * nn[0] - tt[0] * nn[2], bz = tt[0] * nn[1] - tt[1] * nn[0];
-    const bl = Math.hypot(bx, by, bz) || 1;
-    B.push([bx / bl, by / bl, bz / bl]);
-  }
-  const near = (o, arr) => {                    // ближайшая точка пути
-    let bk = 0, bd = Infinity;
-    for (let k = 0; k < pth.length; k++) {
-      const d = (pth[k][0] - arr[o]) ** 2 + (pth[k][1] - arr[o + 1]) ** 2 + (pth[k][2] - arr[o + 2]) ** 2;
-      if (d < bd) { bd = d; bk = k; }
-    }
-    return bk;
-  };
-
-  const bodyBeforeFuse = snap();
+  /* ---------- впаивание: полуканат вливается в кузов, кожа не двигается ---------- */
+  const tube = rope2.tube;
+  const tpv = tube.positions, tpi = tube.index;
+  const nTubeV = tpv.length / 3, nTubeT = tpi.length / 3;
+  const bodyBeforeFuse = snap(), idxBeforeFuse = Uint32Array.from(I());
+  const vBody = volume(Float32Array.from(bodyBeforeFuse), idxBeforeFuse);
+  const vTube = volume(tpv, tpi);
   const t0 = Date.now();
-  const fused = sculpt.fuseRope();               // по умолчанию — именно канавка
+  const fused = sculpt.fuseRope();                // по умолчанию — влить геометрию
   const ms = Date.now() - t0;
-  let maxDown = 0, up = 0, moved = 0;
-  for (let v = 0; v < bodyBeforeFuse.length / 3; v++) {
-    const o = v * 3;
-    const dx = P()[o] - bodyBeforeFuse[o], dy = P()[o + 1] - bodyBeforeFuse[o + 1], dz = P()[o + 2] - bodyBeforeFuse[o + 2];
-    if (Math.hypot(dx, dy, dz) < 1e-6) continue;
-    moved++;
-    const bk = near(o, bodyBeforeFuse), nr = pnr[Math.min(pnr.length - 1, bk)];
-    const h = (dx * nr[0] + dy * nr[1] + dz * nr[2]) / U;   // мм: минус — вдавлено
-    if (h > 0.3) up++;
-    if (-h > maxDown) maxDown = -h;
-  }
-  raise0 = maxDown * U;
+  const nV = P().length / 3, nT = I().length / 3;
+  /* кузов байт в байт: старые вершины на месте, старые грани на месте */
+  let bodyShift = 0;
+  for (let i = 0; i < bodyBeforeFuse.length; i++) bodyShift = Math.max(bodyShift, Math.abs(P()[i] - bodyBeforeFuse[i]));
+  let idxSame = I().length >= idxBeforeFuse.length;
+  for (let i = 0; idxSame && i < idxBeforeFuse.length; i++) if (I()[i] !== idxBeforeFuse[i]) idxSame = false;
+  /* новые вершины — ровно геометрия полуканата, сдвига нет */
+  let tubeShift = 0;
+  for (let i = 0; i < tpv.length; i++) tubeShift = Math.max(tubeShift, Math.abs(P()[bodyBeforeFuse.length + i] - tpv[i]));
+  const vAfter = volume(Float32Array.from(P()), Uint32Array.from(I()));
   const c = chk();
-  console.log(`впаивание канавкой: ${ms} мс, вдавлено ${moved} вершин, глубина ${maxDown.toFixed(2)} мм, ` +
-    `+${fused && fused.added} точек, граней ${I().length / 3}\n`);
-  it('7. канавка ровно в радиус: кожа вдавлена на R, вспучивания нет',
-    Math.abs(maxDown - R2 / U) < 0.1 && up === 0 && moved > 0,
-    `глубина ${maxDown.toFixed(2)} мм при радиусе ${(R2 / U).toFixed(2)} мм, вдавлено ${moved} вершин, ` +
-    `вспучивание больше 0.3 мм ${up}, ${ms} мс`);
-  it('8. после впаивания кузов цел: дыр, неманифолдных и вырожденных нет',
+  console.log(`впаивание: ${ms} мс, вершин ${nV} (+${nV - bodyBeforeFuse.length / 3}), граней ${nT} (+${nT - f0}), ` +
+    `объём +${(vAfter - vBody).toFixed(0)} (полуканат ${vTube.toFixed(0)})\n`);
+  it('7. кузов не сдавливается: его вершины и грани остались байт в байт',
+    bodyShift === 0 && idxSame,
+    `сдвиг вершин ${bodyShift.toExponential(1)}, первые ${f0} граней те же: ${idxSame ? 'да' : 'нет'}`);
+  it('8. полуканат влился в меш как есть: его вершины и грани, без сдвигов',
+    nV - bodyBeforeFuse.length / 3 === nTubeV && nT - f0 === nTubeT && tubeShift === 0 && fused && fused.mode === 'weld',
+    `вершин +${nV - bodyBeforeFuse.length / 3} (ждали ${nTubeV}), граней +${nT - f0} (ждали ${nTubeT}), ` +
+    `сдвиг новых вершин ${tubeShift.toExponential(1)}, режим ${fused && fused.mode}`);
+  it('9. после впаивания кузов — одно замкнутое тело без дыр и выворотов',
     c.openEdges === 0 && c.nonManifold === 0 && c.degenerate === 0,
-    `дыр ${c.openEdges}, неманиф ${c.nonManifold}, вырожд ${c.degenerate}, граней ${I().length / 3} (+${(I().length / 3) - f0})`);
-  it('9. каната в сцене нет — остался только его след в кузове',
+    `дыр ${c.openEdges}, неманиф ${c.nonManifold}, вырожд ${c.degenerate}, граней ${nT}`);
+  it('10. объём вырос ровно на объём полуцилиндра',
+    Math.abs((vAfter - vBody) - vTube) < 0.01 * Math.abs(vTube),
+    `+${(vAfter - vBody).toFixed(0)} ед³ против ${vTube.toFixed(0)} (${(100 * Math.abs((vAfter - vBody) - vTube) / Math.abs(vTube)).toFixed(2)} %)`);
+  it('11. каната в сцене нет — он стал частью модели',
     sculpt.ropeCount === 0 && sculpt.ropeAbsorbed === 1 && !(mesh.parent.children || []).includes(tubeObj),
     `канатов в сцене ${sculpt.ropeCount}, впаяно ${sculpt.ropeAbsorbed}`);
 
-  /* Профиль канавки — по самому полю деформации: поперечное смещение ↔ глубина */
-  const nb = 17, tLo = -(R2 / U) * 1.8, tHi = (R2 / U) * 1.8;
-  const prof = new Array(nb).fill(null);
-  for (let v = 0; v < bodyBeforeFuse.length / 3; v++) {
-    const o = v * 3;
-    const dx = P()[o] - bodyBeforeFuse[o], dy = P()[o + 1] - bodyBeforeFuse[o + 1], dz = P()[o + 2] - bodyBeforeFuse[o + 2];
-    if (Math.hypot(dx, dy, dz) < 1e-6) continue;
-    const bk = near(o, bodyBeforeFuse);
-    const qx = bodyBeforeFuse[o] - pth[bk][0], qy = bodyBeforeFuse[o + 1] - pth[bk][1], qz = bodyBeforeFuse[o + 2] - pth[bk][2];
-    const t = (qx * B[bk][0] + qy * B[bk][1] + qz * B[bk][2]) / U;
-    const h = (dx * pnr[bk][0] + dy * pnr[bk][1] + dz * pnr[bk][2]) / U;
-    const bi = Math.round(((t - tLo) / (tHi - tLo)) * (nb - 1));
-    if (bi < 0 || bi >= nb) continue;
-    if (prof[bi] === null || h < prof[bi]) prof[bi] = h;    // глубже = отрицательнее
-  }
-  const ideal = Array.from({ length: nb }, (_, i) => {
-    const t = tLo + ((tHi - tLo) * i) / (nb - 1);
-    const u = Math.abs(t) / (R2 / U);
-    return u >= 1 ? 0 : -(R2 / U) * Math.sqrt(1 - u * u);
-  });
-  const peak = -Math.min(...prof.filter(v => v !== null));
-  let worst = 0, seen = 0;
-  prof.forEach((v, i) => { if (v === null) return; seen++; worst = Math.max(worst, Math.abs(v - ideal[i])); });
-  prof.forEach((v, i) => { if (v === null) worst = Math.max(worst, Math.abs(ideal[i])); });
-  it('10. профиль поперёк — полукруг вниз на R, к краям сходит в ноль',
-    peak > 0.9 * R2 / U && worst < 0.25 * R2 / U && seen >= nb - 6,
-    `поперёк ${tLo.toFixed(1)}…${tHi.toFixed(1)} мм, глубина ${peak.toFixed(2)} мм, ` +
-    `отклонение от полукруга до ${worst.toFixed(2)} мм · ` +
-    `замер ${prof.map(v => (v === null ? '—' : v.toFixed(2))).join(' ')} · ` +
-    `полукруг ${ideal.map(v => v.toFixed(2)).join(' ')}`);
+  const raise0v = nT;
+  raise0 = raise0v;
 
-  /* коридор: деформация только вокруг каната, только вниз и не глубже R */
-  {
-    let outside = 0, dirt = 0, deeper = 0;
-    for (let v = 0; v < bodyBeforeFuse.length / 3; v++) {
-      const o = v * 3;
-      const dx = P()[o] - bodyBeforeFuse[o], dy = P()[o + 1] - bodyBeforeFuse[o + 1], dz = P()[o + 2] - bodyBeforeFuse[o + 2];
-      if (Math.hypot(dx, dy, dz) < 1e-6) continue;
-      const bk = near(o, bodyBeforeFuse);
-      const qx = bodyBeforeFuse[o] - pth[bk][0], qy = bodyBeforeFuse[o + 1] - pth[bk][1], qz = bodyBeforeFuse[o + 2] - pth[bk][2];
-      const t = (qx * B[bk][0] + qy * B[bk][1] + qz * B[bk][2]) / U;
-      if (Math.abs(t) > 1.5 * (R2 / U)) outside++;
-      const h = (dx * pnr[bk][0] + dy * pnr[bk][1] + dz * pnr[bk][2]) / U;
-      if (h > 0.3) dirt++;                       // вспучивание не больше 12 % радиуса
-      if (-h > 1.02 * (R2 / U)) deeper++;
-    }
-    it('11. деформация только вокруг каната: коридор 1.5R, не глубже R, без вспучивания',
-      outside === 0 && dirt === 0 && deeper === 0,
-      `вне коридора ${outside}, вспучивание больше 0.3 мм ${dirt}, глубже радиуса ${deeper}`);
-  }
-
-  /* ---------- 3. отмена/возврат ---------- */
+/* ---------- 3. отмена/возврат ---------- */
   key('z', { ctrlKey: true });
-  it('12. Ctrl+Z возвращает и кузов, и канат',
-    maxDiff(bodyBeforeFuse, P()) === 0 && sculpt.ropeCount === 1 && sculpt.ropeAbsorbed === 0,
-    `сдвиг ${maxDiff(bodyBeforeFuse, P()).toExponential(1)}, канатов ${sculpt.ropeCount}, впаяно ${sculpt.ropeAbsorbed}`);
+  it('12. Ctrl+Z убирает полуканат из кузова и возвращает канат в сцену',
+    maxDiff(bodyBeforeFuse, P()) === 0 && I().length / 3 === f0 && P().length === bodyBeforeFuse.length &&
+    sculpt.ropeCount === 1 && sculpt.ropeAbsorbed === 0,
+    `сдвиг ${maxDiff(bodyBeforeFuse, P()).toExponential(1)}, граней ${I().length / 3}, вершин ${P().length / 3}, ` +
+    `канатов ${sculpt.ropeCount}, впаяно ${sculpt.ropeAbsorbed}`);
   key('z', { ctrlKey: true, shiftKey: true });
-  it('13. Ctrl+Shift+Z впаивает обратно, канавка на месте',
-    sculpt.ropeAbsorbed === 1 && maxDiff(bodyBeforeFuse, P()) > raise0 * 0.9,
-    `впаяно ${sculpt.ropeAbsorbed}, глубина ${(maxDiff(bodyBeforeFuse, P()) / U).toFixed(2)} мм`);
+  it('13. Ctrl+Shift+Z впаивает обратно — ровно те же вершины и грани',
+    sculpt.ropeAbsorbed === 1 && I().length / 3 === nT && P().length / 3 === nV && maxDiff(bodyBeforeFuse, P()) === 0,
+    `впаяно ${sculpt.ropeAbsorbed}, граней ${I().length / 3} (было ${nT}), вершин ${P().length / 3} (было ${nV}), ` +
+    `сдвиг кожи ${maxDiff(bodyBeforeFuse, P()).toExponential(1)}`);
 }
 
 /* ---------- 4. кромка: канат доходит до края кузова ---------- */
@@ -330,12 +273,51 @@ let raise0 = 0;
     for (const q of path2) bd = Math.min(bd, (q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2 + (q[2] - p[2]) ** 2);
     if (Math.sqrt(bd) > 4 * rp2.radius) far++;
   }
-  it('14. у кромки канавка обрывается сама: сетка цела, дальние точки не тронуты',
+  it('14. у кромки полуканат ложится по краю: сетка цела, дальние точки не тронуты',
     c.openEdges === 0 && c.nonManifold === 0 && far === 0,
     `дыр ${c.openEdges}, неманиф ${c.nonManifold}, точек дальше 4R от каната ${far}, длина каната ${(rp2.len / U).toFixed(1)} мм`);
 }
 
-/* ---------- 5. режим «ребро» (Shift): кожа поднимается, а не вдавливается ---------- */
+/* ---------- 5. режим «канавка» (Shift) — по-прежнему доступен через API ---------- */
+{
+  reset();
+  const R2 = 2.5 * U, z0 = 100, posArr = P(), nrmArr = geo.attributes.normal.array;
+  const pts = [], nrs = [];
+  for (let k = 0; k <= 30; k++) {
+    const x = 200 + (180 * k) / 30;
+    const y = down(x, z0)[1];
+    pts.push([x, y, z0]);
+    let bi = 0, bd = Infinity;
+    for (let v = 0; v < posArr.length; v += 3) {
+      const d = (posArr[v] - x) ** 2 + (posArr[v + 1] - y) ** 2 + (posArr[v + 2] - z0) ** 2;
+      if (d < bd) { bd = d; bi = v; }
+    }
+    nrs.push([nrmArr[bi], nrmArr[bi + 1], nrmArr[bi + 2]]);
+  }
+  const rpg = sculpt.addRope(pts, nrs, 2.5);
+  const before = snap();
+  const res = sculpt.fuseRope(rpg.i, { mode: 'groove' });
+  let deepest = 0, up = 0;
+  for (let v = 0; v < before.length / 3; v++) {
+    const o = v * 3;
+    const dx = P()[o] - before[o], dy = P()[o + 1] - before[o + 1], dz = P()[o + 2] - before[o + 2];
+    if (Math.hypot(dx, dy, dz) < 1e-6) continue;
+    let bk = 0, bd = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = (pts[i][0] - before[o]) ** 2 + (pts[i][1] - before[o + 1]) ** 2 + (pts[i][2] - before[o + 2]) ** 2;
+      if (d < bd) { bd = d; bk = i; }
+    }
+    const nr = nrs[bk];
+    const h = (dx * nr[0] + dy * nr[1] + dz * nr[2]) / U;
+    if (-h > deepest) deepest = -h;
+    if (h > 0.3) up++;
+  }
+  it('15. режим «канавка» (Shift) вдавливает кожу на радиус',
+    !!res && res.mode === 'groove' && Math.abs(deepest - R2 / U) < 0.1 && up === 0,
+    `режим ${res && res.mode}, глубина ${deepest.toFixed(2)} мм, вспучивание больше 0.3 мм ${up}`);
+}
+
+/* ---------- 6. режим «ребро»: кожа поднимается ---------- */
 {
   reset();
   const R2 = 2.5 * U, z0 = 100, posArr = P(), nrmArr = geo.attributes.normal.array;
@@ -370,13 +352,13 @@ let raise0 = 0;
     if (h > upMax) upMax = h;
     if (h < -0.3) sunk++;
   }
-  it('15. Shift (режим «ребро») поднимает кожу на радиус — канавки не остаётся',
+  it('16. режим «ребро» поднимает кожу на радиус',
     !!res && res.mode === 'ridge' && Math.abs(upMax - R2 / U) < 0.1 && sunk === 0,
     `режим ${res && res.mode}, подъём ${upMax.toFixed(2)} мм, вдавлено больше 0.3 мм ${sunk}, ` +
     `канатов в сцене ${sculpt.ropeCount}`);
 }
 
-/* ---------- 6. кнопка «◍ Впаять» без Shift — именно канавка ---------- */
+/* ---------- 7. кнопка «◍ Впаять» без Shift — вливает полуканат в кузов ---------- */
 {
   reset();
   const z0 = 100, posArr = P(), nrmArr = geo.attributes.normal.array;
@@ -392,7 +374,8 @@ let raise0 = 0;
     }
     nrs.push([nrmArr[bi], nrmArr[bi + 1], nrmArr[bi + 2]]);
   }
-  sculpt.addRope(pts, nrs, 2.5);
+  const rpB = sculpt.addRope(pts, nrs, 2.5);
+  const tFaces = sculpt.ropeMesh(rpB.i).geometry.index.array.length / 3;
   const before = snap(), abs0 = sculpt.ropeAbsorbed;
   els['sc-fuse'].click();
   let deepest = 0, up = 0;
@@ -410,9 +393,11 @@ let raise0 = 0;
     if (-h > deepest) deepest = -h;
     if (h > 0.3) up++;
   }
-  it('16. кнопка «◍ Впаять» без Shift оставляет канавку, а не ребро',
-    sculpt.ropeAbsorbed === abs0 + 1 && sculpt.ropeCount === 0 && deepest > 2.2 && up === 0,
-    `впаяно всего ${sculpt.ropeAbsorbed}, канатов в сцене ${sculpt.ropeCount}, глубина ${deepest.toFixed(2)} мм, вспучивание больше 0.3 мм ${up}`);
+  it('17. кнопка «◍ Впаять» без Shift вливает полуканат, не трогая кожу',
+    sculpt.ropeAbsorbed === abs0 + 1 && sculpt.ropeCount === 0 &&
+    maxDiff(before, P()) === 0 && I().length / 3 === 105822 + tFaces,
+    `впаяно всего ${sculpt.ropeAbsorbed}, канатов ${sculpt.ropeCount}, ` +
+    `сдвиг кожи ${maxDiff(before, P()).toExponential(1)}, граней ${I().length / 3} (105822 + ${tFaces})`);
 }
 
 console.log(`\nИТОГ «полуканат»: ${n - bad} из ${n} проверок зелёные, провалов ${bad}`);
