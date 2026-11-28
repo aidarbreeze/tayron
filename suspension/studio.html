@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tayron Studio · редактор</title>
+<style>
+  /* панель — та же, что в index.html; здесь только верхняя полоса проекта */
+  #studio-bar{position:fixed;left:0;right:0;top:0;height:44px;z-index:30;display:flex;align-items:center;
+    gap:10px;padding:0 14px;background:rgba(11,14,19,.94);border-bottom:1px solid rgba(255,255,255,.1);
+    font:13px/1.2 -apple-system,Segoe UI,Roboto,sans-serif;color:#e7ecf3}
+  #studio-bar a{color:#38e1c4;text-decoration:none}
+  #studio-bar a:hover{text-decoration:underline}
+  #studio-bar .name{font-weight:600;max-width:34vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #studio-bar .pill{font-size:11px;color:#8b97a8;border:1px solid rgba(255,255,255,.12);
+    border-radius:20px;padding:3px 9px;white-space:nowrap}
+  #studio-bar .pill.ok{color:#38e1c4;border-color:rgba(56,225,196,.5)}
+  #studio-bar .pill.warn{color:#ffc94d;border-color:rgba(255,201,77,.5)}
+  #studio-bar button{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);
+    color:#e7ecf3;border-radius:8px;padding:5px 10px;font:inherit;cursor:pointer}
+  #studio-bar button:hover{background:rgba(56,225,196,.16);border-color:rgba(56,225,196,.5)}
+  #studio-bar button.acc{background:rgba(56,225,196,.18);border-color:#38e1c4;color:#b9fff2}
+  #studio-bar .sp{flex:1}
+  #studio-msg{position:fixed;left:50%;transform:translateX(-50%);top:52px;z-index:31;background:#111720;
+    border:1px solid rgba(56,225,196,.45);border-radius:10px;padding:8px 14px;font-size:12.5px;
+    color:#e7ecf3;display:none;max-width:70vw}
+  #studio-vers{position:fixed;right:14px;top:52px;z-index:31;background:#111720;border:1px solid rgba(255,255,255,.12);
+    border-radius:12px;padding:12px;display:none;min-width:260px;font-size:12.5px;color:#e7ecf3}
+  #studio-vers h4{margin:0 0 8px;font-size:13px}
+  #studio-vers div.v{display:flex;justify-content:space-between;gap:10px;padding:3px 0;color:#8b97a8}
+  #studio-vers a{color:#38e1c4}
+  body{padding-top:44px}
+  #view{position:fixed;inset:44px 0 0 0}
+  #head{top:60px!important;max-height:34vh;overflow:auto}
+  #ctrl{max-height:calc(100vh - 84px);overflow:auto}
+</style></head>
+<body>
+<div id="studio-bar">
+  <a href="/">← все модели</a>
+  <span class="name" id="sb-name">загрузка…</span>
+  <span class="pill" id="sb-mesh"></span>
+  <span class="pill" id="sb-state">правка не сохранена</span>
+  <span class="sp"></span>
+  <button id="sb-fit" title="Вписать модель в окно (F)">⤢ Вписать</button>
+  <button id="sb-flip" title="Перевернуть модель, если файл пришёл вверх ногами">⇅ Перевернуть</button>
+  <button class="acc" id="sb-save3mf" title="Собрать 3MF и положить новой версией в проект">Сохранить 3MF</button>
+  <button id="sb-savestl" title="Собрать STL и положить новой версией в проект">STL</button>
+  <button id="sb-saveproj" title="Сохранить состояние правки на сервер (Ctrl+S)">Правку</button>
+  <button id="sb-vers" title="Список версий этого проекта">Версии</button>
+  <button id="sb-restore" style="display:none" title="Вернуть автосохранённую правку">↺ Вернуть правку</button>
+</div>
+<div id="studio-msg"></div>
+<div id="studio-vers"></div>
+
+<div id="view"></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/addons/"
+} }
+</script>
+<script type="module">
+/* Панель редактора берём из index.html: одна разметка на два входа — не нужно
+   держать две копии 100+ кнопок и ползунков. Стили тоже оттуда. */
+const src = await (await fetch('./index.html')).text();
+const doc = new DOMParser().parseFromString(src, 'text/html');
+const style = doc.querySelector('style');
+if (style) document.head.appendChild(document.importNode(style, true));
+for (const node of [...doc.body.children]) {
+  if (node.id === 'view' || node.id === 'loading' || node.tagName === 'SCRIPT') continue;
+  document.body.appendChild(document.importNode(node, true));
+}
+await import('./studio.js');
+</script>
+</body></html>

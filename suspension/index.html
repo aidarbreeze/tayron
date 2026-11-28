@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Tayron — редактор кузова · интерактивная модель</title>
+<style>
+  :root{
+    --bg:#0b0e13; --panel:rgba(18,23,31,.82); --line:rgba(255,255,255,.09);
+    --txt:#e8edf4; --dim:#8d9aac; --acc:#38e1c4; --warn:#ff5d5d; --amber:#ffb454;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  #view{position:fixed;inset:0}
+  canvas{display:block;outline:none}
+
+  .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);
+    box-shadow:0 18px 50px rgba(0,0,0,.45)}
+
+  /* ---------- заголовок ---------- */
+  #head{left:20px;top:18px;padding:13px 16px 12px;max-width:352px}
+  #head h1{margin:0;font-size:15px;letter-spacing:.2px;font-weight:650}
+  #head h1 span{color:var(--acc)}
+  #head p{margin:5px 0 0;font-size:11.5px;color:var(--dim);line-height:1.5}
+  #head .keys{display:flex;flex-wrap:wrap;gap:5px 10px;margin-top:9px;font-size:10.5px;color:var(--dim)}
+  #head .keys span{white-space:nowrap}
+  kbd{background:rgba(255,255,255,.09);border-radius:5px;padding:1px 5px;font:inherit;font-size:10px;
+    color:var(--txt);border:1px solid rgba(255,255,255,.08)}
+
+  /* ---------- панель редактора ---------- */
+  #ctrl{left:20px;bottom:20px;width:340px;padding:13px 15px 14px;
+    max-height:calc(100vh - 190px);overflow:auto;scrollbar-width:thin}
+  #ctrl::-webkit-scrollbar{width:6px}
+  #ctrl::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:3px}
+  #ctrl h2{margin:0 0 9px;font-size:10.5px;letter-spacing:1.3px;text-transform:uppercase;color:var(--dim);
+    font-weight:600;display:flex;align-items:center;gap:8px}
+  #ctrl h2:not(:first-child){margin-top:14px}
+  #sc-toolchip{margin-left:auto;text-transform:none;letter-spacing:0;font-size:10.5px;font-weight:600;
+    color:#b9fff2;background:rgba(56,225,196,.13);border:1px solid rgba(56,225,196,.3);
+    border-radius:999px;padding:2px 9px}
+  #sc-toolchip.idle{color:var(--dim);background:rgba(255,255,255,.05);border-color:var(--line)}
+
+  .presets{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .presets.three{grid-template-columns:1fr 1fr 1fr}
+  .btn:disabled{opacity:.4;cursor:default;background:rgba(255,255,255,.02)}
+  .btn.dirty{border-color:rgba(255,201,77,.65);color:#ffdc8f}
+  .btn{border:1px solid var(--line);background:rgba(255,255,255,.045);color:var(--txt);
+    border-radius:9px;padding:7px 8px;font-size:11.5px;cursor:pointer;transition:.14s;text-align:center;
+    font-family:inherit;line-height:1.25}
+  .btn:hover{background:rgba(56,225,196,.13);border-color:rgba(56,225,196,.45)}
+  .btn.on{background:rgba(56,225,196,.2);border-color:var(--acc);color:#b9fff2}
+  .btn.wide{grid-column:span 2}
+
+  .row{display:flex;align-items:center;gap:9px;margin:9px 0 2px}
+  .row .tag{width:26px;font-size:10.5px;color:var(--dim);font-weight:600;letter-spacing:.4px}
+  .row .val{width:52px;text-align:right;font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--amber)}
+  input[type=range]{-webkit-appearance:none;appearance:none;flex:1;height:3px;border-radius:2px;
+    background:rgba(255,255,255,.14);outline:none;cursor:pointer}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;
+    background:var(--acc);box-shadow:0 0 0 3px rgba(56,225,196,.18);cursor:pointer}
+  input[type=range]::-moz-range-thumb{width:13px;height:13px;border:0;border-radius:50%;background:var(--acc)}
+
+  .hint{margin:9px 0 0;font-size:11px;color:var(--dim);line-height:1.5}
+  .hint b{color:var(--txt);font-weight:600}
+
+  /* ---------- свёрнутая подвеска (демо) ---------- */
+  #demo{right:20px;top:18px;width:322px;padding:0;overflow:hidden}
+  #demo>summary{padding:12px 15px;cursor:pointer;font-size:11.5px;color:var(--txt);list-style:none;
+    display:flex;justify-content:space-between;align-items:center;user-select:none;gap:8px}
+  #demo>summary::-webkit-details-marker{display:none}
+  #demo>summary::after{content:'＋';color:var(--acc);font-size:13px;flex:none}
+  #demo[open]>summary::after{content:'−'}
+  #demo>summary .dots{flex:1;border-bottom:1px dotted rgba(255,255,255,.12);height:1px;margin:0 2px}
+  #demo .tagpill{font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);
+    border:1px solid var(--line);border-radius:999px;padding:1px 7px;flex:none}
+  #demo .body{padding:0 15px 14px;max-height:calc(100vh - 90px);overflow:auto;scrollbar-width:thin}
+  #demo .body::-webkit-scrollbar{width:6px}
+  #demo .body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:3px}
+  #demo h2{margin:0 0 9px;font-size:10.5px;letter-spacing:1.3px;text-transform:uppercase;color:var(--dim);font-weight:600}
+  #demo h2:not(:first-child){margin-top:14px}
+
+  .big{display:flex;justify-content:space-between;align-items:flex-end;padding:7px 0;border-bottom:1px dashed rgba(255,255,255,.07)}
+  .big:last-of-type{border:0}
+  .big .k{font-size:11.5px;color:var(--dim);padding-bottom:3px}
+  .big .v{font-size:23px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.5px;line-height:1}
+  .big .v small{font-size:11px;font-weight:400;color:var(--dim);margin-left:2px;letter-spacing:0}
+  .bars{margin-top:13px}
+  .bar{display:flex;align-items:center;gap:7px;margin:6px 0}
+  .bar .n{width:22px;font-size:10px;color:var(--dim);font-weight:600}
+  .bar .t{flex:1;height:7px;border-radius:4px;background:rgba(255,255,255,.07);position:relative;overflow:hidden}
+  .bar .t i{position:absolute;left:50%;top:0;bottom:0;background:linear-gradient(90deg,var(--acc),#4bb8ff);
+    border-radius:4px;transition:width .05s linear}
+  .bar .t i.neg{background:linear-gradient(270deg,#ffb454,#ff8a5b)}
+  .bar .mm{width:46px;text-align:right;font-size:10.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  #warn{margin-top:11px;padding:7px 10px;border-radius:8px;font-size:11px;line-height:1.35;
+    background:rgba(255,93,93,.13);border:1px solid rgba(255,93,93,.4);color:#ffb3b3;display:none}
+
+  /* «как это устроено» — вложенный блок внутри демо */
+  #about{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
+  #about summary{cursor:pointer;font-size:11px;color:var(--dim);list-style:none;display:flex;
+    justify-content:space-between;align-items:center}
+  #about summary::-webkit-details-marker{display:none}
+  #about summary::after{content:'＋';color:var(--acc);font-size:12px}
+  #about[open] summary::after{content:'−'}
+  #about .txt{padding-top:9px;font-size:11px;color:#b9c4d2;line-height:1.6}
+  #about .txt b{color:var(--acc);font-weight:600}
+  #about .txt dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:3px 10px}
+  #about .txt dt{color:var(--dim)}
+  #about .txt dd{margin:0;font-variant-numeric:tabular-nums}
+
+  /* ---------- подсказка ---------- */
+  #hint{left:378px;right:366px;bottom:20px;padding:8px 15px;font-size:11px;color:var(--dim);
+    display:flex;flex-wrap:wrap;justify-content:center;gap:5px 13px;align-items:center}
+  #hint b{color:var(--txt);font-weight:550}
+
+  .hd{display:none!important}
+  #sc-info{margin:9px 0 0;font-size:11px;color:var(--dim);line-height:1.4}
+  #sc-info b{color:var(--acc)}
+
+  #sc-marquee{position:fixed;display:none;border:1px dashed var(--acc);background:rgba(56,225,196,.10);
+    border-radius:2px;pointer-events:none;z-index:4;box-shadow:0 0 0 1px rgba(11,14,19,.5)}
+
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:var(--bg);z-index:50;transition:opacity .5s;flex-direction:column;gap:12px}
+  #loading .sp{width:26px;height:26px;border:2px solid rgba(255,255,255,.15);border-top-color:var(--acc);
+    border-radius:50%;animation:sp .8s linear infinite}
+  #loading p{margin:0;font-size:12px;color:var(--dim)}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  @media (max-width:1180px){
+    #hint{display:none}
+  }
+  @media (max-width:1080px){
+    #demo{width:250px;right:12px;top:12px}
+    #head{max-width:250px;left:12px;top:12px;padding:11px 13px}
+    #head .keys{display:none}
+    #ctrl{left:12px;bottom:12px;width:264px;max-height:58vh}
+  }
+</style>
+</head>
+<body>
+<div id="view"></div>
+
+<div class="panel" id="head">
+  <h1>VW Tayron · <span>редактор кузова</span></h1>
+  <p>Кисти правят кузов прямо в браузере: закрасьте участок — и сгладьте, выровняйте или
+     вдавите фигуру. Сетка остаётся замкнутой, модель можно печатать.</p>
+  <div class="keys">
+    <span><kbd>ЛКМ</kbd> инструмент</span>
+    <span><kbd>ПКМ</kbd> вращать</span>
+    <span><kbd>колесо</kbd> масштаб</span>
+    <span><kbd>1</kbd>…<kbd>9</kbd>, <kbd>−</kbd> инструменты</span>
+    <span><kbd>[</kbd> <kbd>]</kbd> кисть</span>
+    <span><kbd>Enter</kbd> повторить действие</span>
+    <span><kbd>Ctrl</kbd>+<kbd>Z</kbd> отмена</span>
+    <span><kbd>Ctrl</kbd>+<kbd>S</kbd> сохранить правку</span>
+    <span><kbd>Esc</kbd> выход</span>
+  </div>
+</div>
+
+<!-- ============ главная панель: редактор кузова ============ -->
+<div class="panel" id="ctrl">
+  <h2>Инструменты<span id="sc-toolchip" class="idle">просмотр</span></h2>
+  <div class="presets">
+    <button class="btn" id="sc-mode">1 ✎ Участок</button>
+    <button class="btn" id="sc-del">2 ⌫ Ластик</button>
+    <button class="btn" id="sc-pen">3 ✏ Рисовать</button>
+    <button class="btn" id="sc-shape">4 ◆ Фигура</button>
+    <button class="btn" id="sc-point">5 ✚ Точка</button>
+    <button class="btn" id="sc-measure">6 📏 Измерить</button>
+    <button class="btn wide" id="sc-rect">7 ▭ Рамка — зеркальная копия</button>
+    <button class="btn wide" id="sc-groove">8 ╱ Борозда — ровный желоб по прямой</button>
+    <button class="btn wide" id="sc-rope">9 ᴖ Канат — привязать к граням и прожечь канал</button>
+    <button class="btn wide" id="sc-lite">− ⊽ Упростить — точечно убрать лишние полигоны</button>
+  </div>
+  <p class="hint hd" id="sc-hint"><b>Закрасьте участок</b> левой кнопкой (правой — вращать,
+    колесом — приблизить); кольцо под курсором показывает размер кисти. Дальше — кнопки
+    ниже: <b>«Сгладить»</b> (шаг за нажатие), <b>«Выровнять»</b> (в плоскость),
+    <b>«Обострить»</b>, <b>«Выдавить» / «Вдавить»</b> на глубину.
+    <b>[</b> и <b>]</b> — размер кисти, <b>0</b> — снять выделение, <b>Esc</b> — выйти,
+    <b>Enter</b> или <b>пробел</b> — повторить последнее действие.
+    <b>7</b> — рамка: обведите видимую часть <b>одной</b> стороны кузова, затем
+    <b>«⇄ Зеркально»</b> — эта часть встанет зеркалом на другую сторону.
+    <b>8</b> — борозда: протяните линию по кузову, вдоль неё встанет ровный желоб
+    из своих новых точек (ширина — ползунок «Кисть», глубина — «Глубина»).
+    <b>−</b> — упрощение: ведите по пересгущённому участку, рёбра короче шага
+    стягиваются (шаг — «Степень», 4…16 вершин поперёк кисти).</p>
+  <div class="row sc-row hd" id="sc-brushrow">
+    <span class="tag" style="width:auto" id="sc-brushtag">Кисть</span>
+    <input type="range" id="sc-brush" min="0.1" max="20" step="0.1" value="0.5">
+    <span class="val" id="sc-brushv">0.5 мм</span>
+  </div>
+  <div class="row sc-row hd" id="sc-depthrow">
+    <span class="tag" style="width:auto">Глубина</span>
+    <input type="range" id="sc-depth" min="0.05" max="3" step="0.05" value="0.5">
+    <span class="val" id="sc-depthv">0.50 мм</span>
+  </div>
+  <div class="row sc-row hd" id="sc-fallrow">
+    <span class="tag" style="width:auto">Профиль</span>
+    <select id="sc-fall" class="inp" style="flex:1">
+      <option value="smooth">плавный (Blender Smooth)</option>
+      <option value="linear">линейный</option>
+      <option value="sphere">сфера</option>
+      <option value="root">корень</option>
+      <option value="sharp">острый</option>
+      <option value="const">ровный</option>
+    </select>
+  </div>
+  <div class="row sc-row hd" id="sc-amtrow">
+    <span class="tag" style="width:auto">Степень</span>
+    <input type="range" id="sc-amt" min="5" max="100" step="1" value="25">
+    <span class="val" id="sc-amtv">25%</span>
+  </div>
+  <div class="presets three sc-row hd" id="sc-shaperow">
+    <button class="btn on" id="sc-fig-sphere">● Сфера</button>
+    <button class="btn" id="sc-fig-cylinder">▮ Цилиндр</button>
+    <button class="btn" id="sc-fig-box">■ Куб</button>
+  </div>
+  <div class="presets three sc-row hd" id="sc-actions">
+    <button class="btn" id="sc-go">≡ Сгладить</button>
+    <button class="btn" id="sc-flat">▭ Выровнять</button>
+    <button class="btn" id="sc-sharp">✦ Обострить</button>
+  </div>
+  <div class="presets sc-row hd" id="sc-boxrow">
+    <button class="btn" id="sc-boxflip" title="Перевернуть куб на другую сторону — зеркальная копия пойдёт в обратном направлении">⇄ Сторона</button>
+    <button class="btn" id="sc-boxdrop" title="Убрать куб, выделение останется">✕ Убрать куб</button>
+  </div>
+  <div class="presets sc-row hd" id="sc-pinchrow">
+    <button class="btn" id="sc-pinch" title="Стянуть выделенное к центру вдоль поверхности — сводит край в острую линию (ZBrush Pinch)">⇤ Защемить</button>
+  </div>
+  <div class="presets sc-row hd" id="sc-extrude-row">
+    <button class="btn" id="sc-out">⬆ Выдавить</button>
+    <button class="btn" id="sc-in">⬇ Вдавить</button>
+  </div>
+  <div class="presets hd" id="sc-regrow">
+    <button class="btn" id="sc-deselect" title="Снять выделение (клавиша 0)">✕ Снять</button>
+    <button class="btn" id="sc-mirror" title="Скопировать выделенную часть на другую сторону (y → −y)">⇄ Зеркально</button>
+    <button class="btn" id="sc-grow" title="Вырастить выделение на кольцо (как Ctrl+= в Blender)">＋ Шире</button>
+    <button class="btn" id="sc-shrink" title="Сузить выделение на кольцо (как Ctrl+- в Blender)">－ Уже</button>
+    <button class="btn" id="sc-invert" title="Выделить всё, кроме закрашенного">⇋ Инверсия</button>
+    <button class="btn" id="sc-relax" title="Выровнять узлы вдоль поверхности, не меняя форму">⇢ Расслабить</button>
+  </div>
+
+  <div class="sc-row hd" id="sc-roperow" style="display:grid;gap:6px">
+    <div class="row">
+      <span class="tag" style="width:auto">Толщина</span>
+      <input type="range" id="sc-ropew" min="0.4" max="12" step="0.1" value="2.5">
+      <span class="val" id="sc-ropewv">2.5 мм</span>
+    </div>
+    <div class="presets">
+      <button class="btn" id="sc-rope-align" title="Убрать изломы от граней: сгладить путь и снова привязать к кузову">⌐ Выровнять</button>
+      <button class="btn" id="sc-rope-line" title="Поставить канат по прямой между концами">➖ По прямой</button>
+      <button class="btn" id="sc-rope-move" title="Тянуть канат по кузову мышью (Shift — приподнять/утопить)">↔ Двигать</button>
+      <button class="btn" id="sc-rope-reset" title="Вернуть канат к исходной линии">⟲ В исходное</button>
+    </div>
+    <div class="row">
+      <span class="tag" style="width:auto">Плотность</span>
+      <select id="sc-ropeq" class="inp" style="flex:1">
+        <option value="1">черновая — как борозда</option>
+        <option value="2" selected>точная — ровный канал</option>
+        <option value="3">максимум полигонов</option>
+      </select>
+    </div>
+    <div class="presets">
+      <button class="btn" id="sc-burn" title="Прожечь: выжечь в кузове канал ровно по сечению каната (полуцилиндр R: ширина 2R, глубина R). Кожа вне канала не двигается, самого каната в сцене не остаётся — то, что выступало, пропадает. Ctrl+Z возвращает и кузов, и канат">🔥 Прожечь</button>
+      <button class="btn" id="sc-fuse" title="Полуканат становится частью кузова: его геометрия вливается в модель как есть, кожа не сдвигается; каната как объекта сцены больше нет. Shift — вдавить и оставить канавку">◍ Впаять</button>
+      <button class="btn" id="sc-rope-del" title="Убрать канат из сцены (кузов не меняется)">⌫ Убрать</button>
+      <button class="btn" id="sc-rope-save" title="Сохранить канат отдельным файлом 3MF">⬇ Канат</button>
+    </div>
+    <p class="hint" id="sc-ropeinfo">канатов нет — проведите канат по кузову</p>
+  </div>
+
+  <h2>Вид и проверка</h2>
+  <div class="presets">
+    <button class="btn" id="sc-sym">⇄ Симметрия</button>
+    <button class="btn on" id="sc-front">◐ Видимые грани</button>
+    <button class="btn" id="wire">▦ Сетка</button>
+    <button class="btn" id="sec">◧ Сечение</button>
+    <button class="btn" id="sc-check">✓ Проверка</button>
+    <button class="btn" id="reset">⟲ Камера</button>
+  </div>
+  <div class="row hd" id="secrow">
+    <span class="tag" style="width:auto">Разрез</span>
+    <input type="range" id="sec-pos" min="0" max="100" step="1" value="35">
+    <span class="val" id="secv">35%</span>
+  </div>
+
+  <h2>Правка и печать</h2>
+  <div class="presets three">
+    <button class="btn" id="sc-undo" title="Отменить последнюю правку (Ctrl+Z)">↶ Отменить</button>
+    <button class="btn" id="sc-redo" title="Вернуть отменённое (Ctrl+Shift+Z или Ctrl+Y)">↷ Вернуть</button>
+    <button class="btn" id="sc-clear" title="Вернуть исходный кузов — отменяется через Ctrl+Z">⟲ Сбросить</button>
+  </div>
+  <div class="presets" style="margin-top:6px">
+    <button class="btn" id="sc-save">⬇ 3MF</button>
+    <button class="btn" id="sc-stl">⬇ STL</button>
+  </div>
+  <div class="presets" style="margin-top:6px">
+    <button class="btn" id="sc-proj-save" title="Сохранить правку в .json — чтобы продолжить позже">💾 Сохранить</button>
+    <button class="btn" id="sc-proj-load" title="Открыть сохранённую правку (.json)">📂 Открыть</button>
+  </div>
+  <input type="file" id="sc-file" accept=".json,application/json" hidden>
+  <p class="hint"><b>💾/📂</b> — правка в файле .json: продолжить работу после перезагрузки.
+    <b>3MF/STL</b> — готовая модель для печати.</p>
+  <p id="sc-info">область не выбрана — закрасьте участок кистью</p>
+</div>
+
+<!-- ============ подвеска: свёрнутый демо-блок ============ -->
+<details class="panel" id="demo">
+  <summary>Подвеска · демо<span class="dots"></span><span class="tagpill">не актуально</span></summary>
+  <div class="body">
+    <h2>Сценарии нагрузки</h2>
+    <div class="presets">
+      <button class="btn" data-preset="zero">Ровно</button>
+      <button class="btn" data-preset="fl">Нажать ПЛ</button>
+      <button class="btn" data-preset="roof">На крышу</button>
+      <button class="btn" data-preset="trunk">В багажник</button>
+      <button class="btn" data-preset="side">Набок</button>
+      <button class="btn" data-preset="diag">Диагональ</button>
+      <button class="btn wide" data-preset="demo">▶ Качание (демо)</button>
+    </div>
+
+    <p class="hint">Клик по кузову — нагрузить ближайший угол (+250 г), <b>Shift</b>+клик —
+      снять. Подписи над кузовом показывают нагрузку на каждом углу.</p>
+    <h2>Нагрузка на угол, г</h2>
+    <div id="sliders"></div>
+
+    <h2>Настройки</h2>
+    <p class="hint">Пружин нет: упругость даёт S-образный переходник (лента 6×0.9 мм). У напечатанной модели ≈100 г жёсткость 0.63 Н/мм на колесо — просадка 0.39 мм при ходе 1.4 мм.</p>
+    <div class="row">
+      <span class="tag" style="width:auto">Жёсткость</span>
+      <input type="range" id="k" min="0.2" max="1.5" step="0.01" value="0.63">
+      <span class="val" id="kv">0.63 Н/мм</span>
+    </div>
+    <div class="row">
+      <span class="tag" style="width:auto">Масса</span>
+      <input type="range" id="mass" min="0.04" max="0.4" step="0.01" value="0.10">
+      <span class="val" id="mv">0.1 кг</span>
+    </div>
+    <div class="row">
+      <span class="tag" style="width:auto">Демпфер</span>
+      <input type="range" id="damp" min="0.05" max="0.8" step="0.01" value="0.22">
+      <span class="val" id="dv">0.22</span>
+    </div>
+
+    <h2>Сборка</h2>
+    <div class="presets">
+      <button class="btn wide" id="explode">▶ Разобрать</button>
+      <button class="btn wide" id="plate">🖨 Разложить на стол</button>
+    </div>
+    <div class="row">
+      <span class="tag" style="width:auto">Разборка</span>
+      <input type="range" id="ex" min="0" max="1" step="0.01" value="0">
+      <span class="val" id="exv">0%</span>
+    </div>
+    <div class="row">
+      <span class="tag" style="width:auto">На стол</span>
+      <input type="range" id="plv" min="0" max="1" step="0.01" value="0">
+      <span class="val" id="plvv">0%</span>
+    </div>
+    <p class="hint" id="platehint" style="display:none">Раскладка для печати: 13 деталей на столе 220 × 220 мм
+      (колесо и втулка лежат на боку, переходник — колодкой вниз). Файл: <b>Tayron6_plate.3mf</b>.</p>
+    <div class="presets" style="margin-top:10px">
+      <button class="btn" id="shake">Тряхнуть</button>
+      <button class="btn" id="spin">▶ Крутить колёса</button>
+      <button class="btn wide" id="xray">Рентген</button>
+    </div>
+
+    <h2>Положение кузова (от покоя)</h2>
+    <div class="big"><span class="k">Крен</span><span class="v" id="roll">0.0<small>°</small></span></div>
+    <div class="big"><span class="k">Тангаж</span><span class="v" id="pitch">0.0<small>°</small></span></div>
+    <div class="big"><span class="k">Просадка кузова</span><span class="v" id="sag">0<small>мм</small></span></div>
+    <h2 style="margin-top:14px">Ход подвески по колёсам</h2>
+    <div class="bars" id="bars"></div>
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:7px">
+      <span>сжатие ←</span><span>ход 1.4 мм</span><span>→ отбой</span>
+    </div>
+    <div id="warn">Пробой: S-лента легла на отбойник в канале кузова. Дальше кузов не проседает.</div>
+
+    <details id="about">
+      <summary>Как это устроено</summary>
+      <div class="txt">
+        Пружин и шарниров нет. Колесо держится на S-образном упругом переходнике
+        (вид сверху — буква S), амортизация — изгиб его тонкой ленты.
+        <dl style="margin-top:8px">
+          <dt>Переходник</dt><dd>лента 6 × 0.9 мм, длина по кривой 18.3 мм, 3EI/L³ = 0.63 Н/мм</dd>
+          <dt>Крепление к кузову</dt><dd>корневая колодка 5×2.5×3 мм в канале кузова (на клей)</dd>
+          <dt>Втулка колеса</dt><dd>фланец Ø9.6 × 1.0 мм вклеен в паз ступицы, бобышка Ø6 × 3.0 мм торчит к кузову и даёт ровную цилиндрическую поверхность (в самом колесе паз ребристый, 6.1–7.2 мм по радиусу)</dd>
+          <dt>Посадка колеса</dt><dd>стакан Ø7.1 звена садится на бобышку Ø6 с натягом ≈0.07 мм (пересечение 3.7 мм³) и держит колесо от спадания; до самого колеса звено не достаёт — зазор 3.0 мм по радиусу, поэтому при вращении ничего не закусывает</dd>
+          <dt>Диск</dt><dd>не сверлится и не режется: лицевая сторона не тронута</dd>
+          <dt>Протектор</dt><dd>две кольцевые канавки 0.8 × 0.4 мм по беговой дорожке, как продольные канавки шины</dd>
+          <dt>Раскладка для печати</dt><dd>кнопка «🖨 Разложить на стол»: все 13 деталей встают на стол 220 × 220 мм в том же порядке, в каком их режет <code>layout.py</code> → файл <code>Tayron6_plate.3mf</code>; занято 200 × 104 мм</dd>
+          <dt>Разборка</dt><dd>кнопка «Разобрать»: колёса сходят с втулок, втулки выпадают из пазов ступиц, за ними S-переходники выходят из каналов кузова</dd>
+          <dt>Кручение</dt><dd>кнопка «Крутить колёса» — колесо вращается вокруг своей оси, посадка при этом не мешает</dd>
+          <dt>Вращение колеса</dt><dd>трение только по втулке Ø6 (гладкая, из PLA), ребристый паз колеса в контакте не участвует — проверено булевой операцией при повороте на 0…315°: пересечение звено ∩ колесо = 0.000 мм³</dd>
+          <dt>Круглость шины</dt><dd>радиус беговой дорожки выровнен: разброс 0.035–0.135 мм по 24 секторам (было 0.157–0.195), колёса не выглядят овальными</dd>
+          <dt>Ход</dt><dd>1.4 мм до отбойника (напряжение в ленте 20 МПа при пределе PLA ≈ 45)</dd>
+          <dt>Колея</dt><dd>1655 мм</dd>
+          <dt>База</dt><dd>2789 мм</dd>
+          <dt>1 ед. модели</dt><dd>0.17 мм печати</dd>
+        </dl>
+      </div>
+    </details>
+  </div>
+</details>
+
+<div class="panel" id="hint">
+  <span><b>ЛКМ</b> — инструмент</span>
+  <span><b>ПКМ</b> — вращать</span>
+  <span><b>колесо</b> — приблизить</span>
+  <span><kbd>1</kbd>…<kbd>9</kbd> — инструменты</span>
+  <span><kbd>0</kbd> — снять выделение</span>
+  <span><kbd>Esc</kbd> — выход</span>
+  <span><kbd>Ctrl</kbd>+<kbd>Z</kbd> — отмена</span>
+  <span><kbd>Ctrl</kbd>+<kbd>S</kbd> — сохранить правку</span>
+</div>
+
+<div id="sc-marquee"></div>
+
+<div id="loading"><div class="sp"></div><p>Собираю модель…</p></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/addons/"
+} }
+</script>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
