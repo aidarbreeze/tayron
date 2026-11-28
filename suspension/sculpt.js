@@ -1624,6 +1624,50 @@ export function initSculpt(opts) {
     }
     return { lat: Math.sqrt(best), s, beyond, seg: bestSeg, t: bestT };
   }
+  /* «Прожечь»: поставить стенку канала ровно на сечение каната.
+     Полуцилиндр: h(t) = −R·√(1−(t/R)²) при |t| ≤ R и 0 дальше. Узел сохраняет
+     своё место вдоль кожи и в стороне (тангенциальная часть не меняется),
+     меняется только высота над плоскостью кожи. Поэтому стенка в точности
+     повторяет полуцилиндр каната, а за пределами полосы кожа возвращается
+     туда, где была, — никакого «продавливания» пояска вокруг канала. */
+  function snapChannel(path, R, nrms) {
+    const g = mesh.geometry;
+    const pos = g.attributes.position.array;
+    const nrm = g.attributes.normal.array;
+    const reach = R * 1.25;
+    let moved = 0, maxd = 0;
+    for (let v = 0; v < pos.length / 3; v++) {
+      const o = v * 3;
+      const p = [pos[o], pos[o + 1], pos[o + 2]];
+      const pr = pathProj(path, p);
+      if (pr.beyond || pr.lat > reach) continue;
+      const A = path[pr.seg], B = path[pr.seg + 1], u = pr.t;
+      const n0 = nrms[pr.seg] || [0, 1, 0], n1 = nrms[pr.seg + 1] || n0;
+      let nx = n0[0] + (n1[0] - n0[0]) * u;
+      let ny = n0[1] + (n1[1] - n0[1]) * u;
+      let nz = n0[2] + (n1[2] - n0[2]) * u;
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      nx /= nl; ny /= nl; nz /= nl;
+      /* только та сторона кожи, куда смотрит канат: соседние слои панели
+         (стекло, уплотнитель) не должны попасть в канал */
+      if (nrm[o] * nx + nrm[o + 1] * ny + nrm[o + 2] * nz < 0.2) continue;
+      const ax = A[0] + (B[0] - A[0]) * u;
+      const ay = A[1] + (B[1] - A[1]) * u;
+      const az = A[2] + (B[2] - A[2]) * u;
+      const rel = [p[0] - ax, p[1] - ay, p[2] - az];
+      const dn = rel[0] * nx + rel[1] * ny + rel[2] * nz;
+      const ix = rel[0] - nx * dn, iy = rel[1] - ny * dn, iz = rel[2] - nz * dn;
+      const t = Math.hypot(ix, iy, iz);
+      if (t >= R) continue;                    // вне сечения каната — не трогаем
+      const h = -R * Math.sqrt(1 - (t / R) * (t / R));
+      pos[o] += nx * h; pos[o + 1] += ny * h; pos[o + 2] += nz * h;
+      moved++;
+      if (-h > maxd) maxd = -h;
+    }
+    g.attributes.position.needsUpdate = true;
+    g.computeVertexNormals();
+    return { moved, maxd };
+  }
   /* Длина пути в единицах модели */
   function pathLen(pts) {
     let L = 0;
@@ -2776,52 +2820,43 @@ export function initSculpt(opts) {
     return touch.length;
   }
 
-  function burnRope(i = ropeSel) {
+  function burnRope(i = ropeSel, opts = {}) {
     const rp = ropes[i];
     if (!rp) { syncInfo('прожигать нечего: сначала проведите канат по кузову'); return null; }
+    if (rp.absorbed) { syncInfo(`канат «${rp.name}» уже впаян — прожигать нечего`); return null; }
     const t0 = performance.now();
     const R = rp.radius;
-    const hw = R * 1.06;                                  // желоб на 6 % шире каната
-    /* глубина: по умолчанию ровно радиус (канат ложится вровень), ползунок
-       «Глубина» может сделать канал глубже — до двух радиусов */
-    const depth = Math.min(2 * R, Math.max(R, depthD()));
     const path = rp.path.slice();
-    path.nrms = rp.nrms;                                  // всё сечение едет в одну сторону
-    pushHist();                                           // отмена вернёт кузов, канат остаётся
-    /* «Плотность»: 1 — как борозда, 2 — точная, 3 — максимум полигонов.
-       Шаг сгущения = hw/spd, поэтому канал получается гладким: чем мельче
-       сетка в полосе, тем ровнее стенка и кромка. snap — после вдавливания
-       каждый узел канала ставится точно на аналитический профиль
-       (полуэллипс), из-за чего пропадают «заломы» от неровного шага сетки. */
-    /* extraPass оставлен выключенным: повторные проходы bandPass на тонкой
-       панели (коробка 3 мм, канат 0.6 мм) плодили вырожденные грани и дыры —
-       проверено стендом dbg_box. Плотность даёт шаг сгущения spd. */
-    const Q = { 1: { spd: 3.5, limit: 20000, snap: false, extra: 0 },
-                2: { spd: 5, limit: 80000, snap: true, extra: 0 },
-                3: { spd: 6.5, limit: 160000, snap: true, extra: 0 } }[ropeQual] ||
-              { spd: 5, limit: 80000, snap: true, extra: 0 };
-    const st = carvePath(path, hw, depth, {
-      limit: Q.limit, spd: Q.spd, ringIters: 3, snap: Q.snap, extraPass: Q.extra, red: true
-    });
-    rp.off = 0;                                           // канат садится в канал
-    /* Сгущение полосы даёт много узких граней; их нормали «гуляют», и в
-       затенении канал выглядел мятой бумагой (геометрия при этом ровная —
-       проверено лучами по профилю). Сглаживаем нормали только у полосы. */
-    smoothNormalsNear(path, 4 * hw, 6);
-    rebuildRope(rp);
-    const L = pathLen(rp.path);
+    path.nrms = opts.rawNormals ? rp.nrms : cleanNormals(rp.path, rp.nrms, opts.win || 3, opts.deg || 35);
+    pushHist();                       // отмена вернёт и кузов, и канат
+    /* «🔥 Прожечь»: канал ровно по сечению каната — полукруг радиуса R.
+       Сначала сгущение полосы (carvePath с depth 0, поясок не разглаживается:
+       ringIters -1), потом стенка по аналитическому полукругу (snapChannel).
+       Глубина = радиус, полуширина = радиус, кожа вне полосы не двигается. */
+    const Q = { 1: { spd: 4, limit: 30000 }, 2: { spd: 6, limit: 90000 },
+                3: { spd: 8, limit: 180000 } }[ropeQual] || { spd: 6, limit: 90000 };
+    /* 1) сгустить сетку вдоль каната (без смещения), 2) вырезать канал точно
+       по сечению: каждый узел полосы |t| < R опускается на h(t) полукруга, вне
+       полосы не двигается вообще */
+    const st = carvePath(path, R, 0, { sign: -1, limit: Q.limit, spd: opts.spd || Q.spd, ringIters: -1 });
+    const sc = snapChannel(path, R, path.nrms);
+    smoothNormalsNear(path, 4 * R, 6);
+    const L = pathLen(path);
     const secs = (performance.now() - t0) / 1000;
-    const prev = rp.burn;
-    rp.burn = {
-      width: hw * 2, depth: st.maxd, len: L, moved: st.moved, added: st.added, secs,
-      vertsAfter: vk, n: (prev ? prev.n : 0) + 1
-    };
+    const name = rp.name;
+    setAbsorbed(rp, true);            // канат уходит: то, что выступало, не существует
+    ropeSel = pickRope();
+    tintRopes();
     syncRopeRow();
-    syncInfo(`🔥 канал по канату «${rp.name}»: ширина ${(hw * 2 / U).toFixed(2)} мм, ` +
-      `глубина ${(st.maxd / U).toFixed(2)} мм, длина ${(L / U).toFixed(1)} мм` +
-      (rp.burn.n > 1 ? ` (прожиг №${rp.burn.n} — канал глубже)` : '') +
-      ` · новых точек ${st.added}, вдавлено ${st.moved} · ${secs.toFixed(2)} с`);
-    return rp.burn;
+    const out = { rope: name, mode: 'cut', width: (R * 2) / U, depth: (R / U),
+      len: L / U, moved: sc.moved, added: st.added,
+      secs };
+    rp.burn = out;
+    syncInfo(`🔥 канал по канату «${name}»: ${(R * 2 / U).toFixed(2)} мм шириной, ` +
+      `глубиной ${(sc.maxd / U).toFixed(2)} мм, длина ${(L / U).toFixed(1)} мм · ` +
+      `стенка по сечению каната (${sc.moved} узлов) · сгущено на +${st.added} точек · ` +
+      `самого каната больше нет — то, что выступало, пропало · ${secs.toFixed(2)} с`);
+    return out;
   }
 
   /** канат перестал быть отдельным объектом (впаян в кузов) — прячем/возвращаем.
@@ -4922,7 +4957,7 @@ export function initSculpt(opts) {
       if (pathLen(rs.pts) < 4 * R) return null;
       return newRope(rs.pts, rs.nrms, R);
     },
-    burnRope: (i = ropeSel) => burnRope(i),
+    burnRope: (i = ropeSel, opts) => burnRope(i, opts || {}),
     fuseRope: (i = ropeSel, opts) => fuseRope(i, opts || {}),
     get ropeAbsorbed() { return ropes.filter(r => r.absorbed).length; },
     ropeAlign: (kind) => ropeAlign(kind),
